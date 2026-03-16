@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -111,6 +112,16 @@ function buildVolumeMounts(
         readonly: true,
       });
     }
+  }
+
+  // Shared blueprints directory (read-write for all containers)
+  const blueprintsDir = path.join(os.homedir(), 'Documents', 'blueprints');
+  if (fs.existsSync(blueprintsDir)) {
+    mounts.push({
+      hostPath: blueprintsDir,
+      containerPath: '/workspace/blueprints',
+      readonly: false,
+    });
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
