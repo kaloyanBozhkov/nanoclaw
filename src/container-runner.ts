@@ -281,9 +281,14 @@ function buildContainerArgs(
       // don't overwrite the host's architecture-specific binaries, but persist
       // across container restarts to avoid re-installing every time.
       const hostNodeModules = path.join(mount.hostPath, 'node_modules');
-      if (fs.existsSync(hostNodeModules) && mount.containerPath.startsWith('/workspace/extra/')) {
+      if (
+        fs.existsSync(hostNodeModules) &&
+        mount.containerPath.startsWith('/workspace/extra/')
+      ) {
         const mountName = path.basename(mount.hostPath);
-        const groupFolder = containerName.replace(/^nanoclaw-/, '').replace(/-\d+$/, '');
+        const groupFolder = containerName
+          .replace(/^nanoclaw-/, '')
+          .replace(/-\d+$/, '');
         const agentNodeModules = path.join(
           GROUPS_DIR,
           groupFolder,
@@ -291,7 +296,10 @@ function buildContainerArgs(
           mountName,
         );
         fs.mkdirSync(agentNodeModules, { recursive: true });
-        args.push('-v', `${agentNodeModules}:${mount.containerPath}/node_modules`);
+        args.push(
+          '-v',
+          `${agentNodeModules}:${mount.containerPath}/node_modules`,
+        );
       }
     }
   }

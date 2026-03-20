@@ -71,8 +71,12 @@ function transcribeVoice(oggPath: string): string {
 
     return output.trim();
   } finally {
-    try { fs.unlinkSync(oggPath); } catch {}
-    try { fs.unlinkSync(wavPath); } catch {}
+    try {
+      fs.unlinkSync(oggPath);
+    } catch {}
+    try {
+      fs.unlinkSync(wavPath);
+    } catch {}
   }
 }
 
