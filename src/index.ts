@@ -38,6 +38,7 @@ import {
   initDatabase,
   setRegisteredGroup,
   setRouterState,
+  deleteSession,
   setSession,
   storeChatMetadata,
   storeMessage,
@@ -573,6 +574,10 @@ async function main(): Promise<void> {
       channel?: string,
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
+    onResetSession: (groupFolder: string) => {
+      deleteSession(groupFolder);
+      delete sessions[groupFolder];
+    },
     registeredGroups: () => registeredGroups,
   };
 

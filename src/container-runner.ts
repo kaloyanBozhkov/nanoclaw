@@ -7,6 +7,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { readEnvFile } from './env.js';
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
@@ -249,6 +250,14 @@ function buildContainerArgs(
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
 
+  // Pass GitHub token for git/gh CLI access inside containers
+  const envSecrets = readEnvFile(['GH_TOKEN', 'GITHUB_TOKEN']);
+  const ghToken = envSecrets.GH_TOKEN || envSecrets.GITHUB_TOKEN || '';
+  if (ghToken) {
+    args.push('-e', `GH_TOKEN=${ghToken}`);
+    args.push('-e', `GITHUB_TOKEN=${ghToken}`);
+  }
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 
@@ -267,6 +276,23 @@ function buildContainerArgs(
       args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
     } else {
       args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+
+      // Shadow node_modules with a persistent host directory so container installs
+      // don't overwrite the host's architecture-specific binaries, but persist
+      // across container restarts to avoid re-installing every time.
+      const hostNodeModules = path.join(mount.hostPath, 'node_modules');
+      if (fs.existsSync(hostNodeModules) && mount.containerPath.startsWith('/workspace/extra/')) {
+        const mountName = path.basename(mount.hostPath);
+        const groupFolder = containerName.replace(/^nanoclaw-/, '').replace(/-\d+$/, '');
+        const agentNodeModules = path.join(
+          GROUPS_DIR,
+          groupFolder,
+          'node_modules',
+          mountName,
+        );
+        fs.mkdirSync(agentNodeModules, { recursive: true });
+        args.push('-v', `${agentNodeModules}:${mount.containerPath}/node_modules`);
+      }
     }
   }
 

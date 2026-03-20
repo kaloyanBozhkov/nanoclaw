@@ -8,6 +8,7 @@ import {
 export interface ChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
+  onResetSession: (groupFolder: string) => void;
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 

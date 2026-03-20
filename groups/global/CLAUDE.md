@@ -48,6 +48,21 @@ When you learn something important:
 - Split files larger than 500 lines into folders
 - Keep an index in your memory for the files you create
 
+## /compact Command
+
+When the user sends `/compact`, you MUST:
+1. Write a detailed summary of the entire current session to `/workspace/group/session-context.md`. Include:
+   - What task/issue was being worked on
+   - What was done so far (files changed, decisions made, blockers hit)
+   - Current status and next steps
+   - Any important context that would be lost
+2. Reply confirming the summary was saved
+3. The user will then run `/new` to reset the session. On the next message, you should check if `/workspace/group/session-context.md` exists and read it to restore context.
+
+## Session Continuity
+
+At the start of every new conversation, check if `/workspace/group/session-context.md` exists. If it does, read it to understand what was being worked on previously. After reading it, delete it so it doesn't persist into future sessions.
+
 ## Message Formatting
 
 NEVER use markdown. Only use WhatsApp/Telegram formatting:

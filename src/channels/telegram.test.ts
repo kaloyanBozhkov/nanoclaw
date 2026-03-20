@@ -79,6 +79,7 @@ function createTestOpts(
   return {
     onMessage: vi.fn(),
     onChatMetadata: vi.fn(),
+    onResetSession: vi.fn(),
     registeredGroups: vi.fn(() => ({
       'tg:100200300': {
         name: 'Test Group',
