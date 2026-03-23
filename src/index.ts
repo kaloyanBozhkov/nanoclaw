@@ -213,6 +213,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Collect image paths from messages and translate to container paths
+  const groupDir = resolveGroupFolderPath(group.folder);
+  const allImages = missedMessages
+    .flatMap((m) => m.images || [])
+    .filter((p) => fs.existsSync(p))
+    .map((hostPath) => {
+      // Translate host path (groups/{folder}/images/...) to container path (/workspace/group/images/...)
+      const rel = path.relative(groupDir, hostPath);
+      return `/workspace/group/${rel}`;
+    });
+
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
@@ -238,7 +249,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (result.status === 'error') {
       hadError = true;
     }
-  });
+  }, allImages.length > 0 ? allImages : undefined);
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
@@ -271,6 +282,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  images?: string[],
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
@@ -321,6 +333,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        images,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),

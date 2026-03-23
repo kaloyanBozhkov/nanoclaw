@@ -63,6 +63,33 @@ server.tool(
 );
 
 server.tool(
+  'send_image',
+  "Send an image/photo to the user or group. The file must exist on disk (e.g. a screenshot you saved, a generated chart, or a downloaded image). Supports PNG, JPG, WEBP, and GIF.",
+  {
+    file_path: z.string().describe('Absolute path to the image file (e.g. /workspace/group/screenshot.png)'),
+    caption: z.string().optional().describe('Optional caption/description to send with the image (supports Markdown)'),
+  },
+  async (args) => {
+    if (!fs.existsSync(args.file_path)) {
+      return { content: [{ type: 'text' as const, text: `Error: file not found at ${args.file_path}` }] };
+    }
+
+    const data: Record<string, string | undefined> = {
+      type: 'image',
+      chatJid,
+      filePath: args.file_path,
+      caption: args.caption || undefined,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: 'Image sent.' }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 

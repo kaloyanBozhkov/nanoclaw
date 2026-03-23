@@ -27,6 +27,8 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  /** Image file paths (container-relative) to pass as vision input */
+  images?: string[];
 }
 
 interface ContainerOutput {
@@ -47,9 +49,13 @@ interface SessionsIndex {
   entries: SessionEntry[];
 }
 
+type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
+
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: string | ContentBlock[] };
   parent_tool_use_id: null;
   session_id: string;
 }
@@ -71,6 +77,38 @@ class MessageStream {
     this.queue.push({
       type: 'user',
       message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+      session_id: '',
+    });
+    this.waiting?.();
+  }
+
+  pushWithImages(text: string, imagePaths: string[]): void {
+    const content: ContentBlock[] = [{ type: 'text', text }];
+    for (const imgPath of imagePaths) {
+      try {
+        if (!fs.existsSync(imgPath)) {
+          log(`Image not found: ${imgPath}`);
+          continue;
+        }
+        const data = fs.readFileSync(imgPath).toString('base64');
+        const ext = path.extname(imgPath).toLowerCase();
+        const mediaType = ext === '.png' ? 'image/png'
+          : ext === '.webp' ? 'image/webp'
+          : ext === '.gif' ? 'image/gif'
+          : 'image/jpeg';
+        content.push({
+          type: 'image',
+          source: { type: 'base64', media_type: mediaType, data },
+        });
+        log(`Loaded image: ${imgPath} (${mediaType})`);
+      } catch (err) {
+        log(`Failed to load image ${imgPath}: ${err}`);
+      }
+    }
+    this.queue.push({
+      type: 'user',
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -338,7 +376,11 @@ async function runQuery(
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
-  stream.push(prompt);
+  if (containerInput.images?.length) {
+    stream.pushWithImages(prompt, containerInput.images);
+  } else {
+    stream.push(prompt);
+  }
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;

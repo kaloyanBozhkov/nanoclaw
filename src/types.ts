@@ -51,6 +51,8 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  /** Absolute paths to image files attached to this message */
+  images?: string[];
 }
 
 export interface ScheduledTask {

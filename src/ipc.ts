@@ -12,11 +12,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
-  sendPhoto: (
-    jid: string,
-    filePath: string,
-    caption?: string,
-  ) => Promise<void>;
+  sendPhoto: (jid: string, filePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -80,13 +76,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               const chatJid = data.chatJid;
               if (!chatJid) {
-                logger.warn({ file, sourceGroup }, 'IPC message missing chatJid');
+                logger.warn(
+                  { file, sourceGroup },
+                  'IPC message missing chatJid',
+                );
               } else {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[chatJid];
                 const authorized =
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup);
+                  isMain || (targetGroup && targetGroup.folder === sourceGroup);
                 if (!authorized) {
                   logger.warn(
                     { chatJid, sourceGroup },
@@ -94,10 +92,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   );
                 } else if (data.type === 'message' && data.text) {
                   await deps.sendMessage(chatJid, data.text);
-                  logger.info(
-                    { chatJid, sourceGroup },
-                    'IPC message sent',
-                  );
+                  logger.info({ chatJid, sourceGroup }, 'IPC message sent');
                 } else if (data.type === 'image' && data.filePath) {
                   // Resolve container path to host path
                   // Agent writes to /workspace/group/ which maps to groups/{folder}/

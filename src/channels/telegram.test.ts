@@ -154,6 +154,7 @@ function createMediaCtx(overrides: {
       date: overrides.date ?? Math.floor(Date.now() / 1000),
       message_id: overrides.messageId ?? 1,
       caption: overrides.caption,
+      photo: [{ file_id: 'test-photo-id', width: 100, height: 100 }],
       ...(overrides.extra || {}),
     },
     me: { username: 'andy_ai_bot' },
@@ -607,7 +608,9 @@ describe('TelegramChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Voice message - transcription failed]' }),
+        expect.objectContaining({
+          content: '[Voice message - transcription failed]',
+        }),
       );
     });
 

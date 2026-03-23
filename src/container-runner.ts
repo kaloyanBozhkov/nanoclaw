@@ -43,6 +43,8 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  /** Image file paths (container-relative) to pass as vision input */
+  images?: string[];
 }
 
 export interface ContainerOutput {
@@ -251,11 +253,17 @@ function buildContainerArgs(
   }
 
   // Pass GitHub token for git/gh CLI access inside containers
-  const envSecrets = readEnvFile(['GH_TOKEN', 'GITHUB_TOKEN']);
+  const envSecrets = readEnvFile(['GH_TOKEN', 'GITHUB_TOKEN', 'VERCEL_TOKEN']);
   const ghToken = envSecrets.GH_TOKEN || envSecrets.GITHUB_TOKEN || '';
   if (ghToken) {
     args.push('-e', `GH_TOKEN=${ghToken}`);
     args.push('-e', `GITHUB_TOKEN=${ghToken}`);
+  }
+
+  // Pass Vercel token for vercel CLI access inside containers
+  const vercelToken = envSecrets.VERCEL_TOKEN || '';
+  if (vercelToken) {
+    args.push('-e', `VERCEL_TOKEN=${vercelToken}`);
   }
 
   // Runtime-specific args for host gateway resolution

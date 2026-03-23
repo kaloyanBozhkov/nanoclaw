@@ -106,6 +106,15 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add images column for image attachments (JSON array of file paths)
+  try {
+    database.exec(
+      `ALTER TABLE messages ADD COLUMN images TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Add is_main column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -262,7 +271,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, images) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -272,6 +281,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    msg.images?.length ? JSON.stringify(msg.images) : null,
   );
 }
 
@@ -316,7 +326,7 @@ export function getNewMessages(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, images
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -328,14 +338,16 @@ export function getNewMessages(
 
   const rows = db
     .prepare(sql)
-    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as (NewMessage & { images?: string })[];
+
+  const messages = rows.map(parseImageColumn);
 
   let newTimestamp = lastTimestamp;
-  for (const row of rows) {
+  for (const row of messages) {
     if (row.timestamp > newTimestamp) newTimestamp = row.timestamp;
   }
 
-  return { messages: rows, newTimestamp };
+  return { messages, newTimestamp };
 }
 
 export function getMessagesSince(
@@ -349,7 +361,7 @@ export function getMessagesSince(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, images
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -358,9 +370,23 @@ export function getMessagesSince(
       LIMIT ?
     ) ORDER BY timestamp
   `;
-  return db
+  const rows = db
     .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as (NewMessage & { images?: string })[];
+  return rows.map(parseImageColumn);
+}
+
+/** Parse the JSON `images` column from SQLite back into a string array */
+function parseImageColumn(row: NewMessage & { images?: string }): NewMessage {
+  if (row.images && typeof row.images === 'string') {
+    try {
+      const parsed = JSON.parse(row.images);
+      return { ...row, images: parsed };
+    } catch {
+      return { ...row, images: undefined };
+    }
+  }
+  return { ...row, images: undefined };
 }
 
 export function createTask(
