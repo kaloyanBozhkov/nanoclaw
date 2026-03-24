@@ -462,7 +462,13 @@ async function startMessageLoop(): Promise<void> {
                 })
             : [];
 
-          if (queue.sendMessage(chatJid, formatted, pipedImages.length > 0 ? pipedImages : undefined)) {
+          if (
+            queue.sendMessage(
+              chatJid,
+              formatted,
+              pipedImages.length > 0 ? pipedImages : undefined,
+            )
+          ) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
