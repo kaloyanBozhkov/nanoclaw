@@ -215,41 +215,56 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Collect image paths from messages and translate to container paths
   const groupDir = resolveGroupFolderPath(group.folder);
-  const allImages = missedMessages
-    .flatMap((m) => m.images || [])
+  const rawImages = missedMessages.flatMap((m) => m.images || []);
+  const allImages = rawImages
     .filter((p) => fs.existsSync(p))
     .map((hostPath) => {
       // Translate host path (groups/{folder}/images/...) to container path (/workspace/group/images/...)
       const rel = path.relative(groupDir, hostPath);
       return `/workspace/group/${rel}`;
     });
+  if (rawImages.length > 0) {
+    logger.info(
+      { group: group.name, rawImages, allImages },
+      'Image attachments found',
+    );
+  }
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info(
+          { group: group.name },
+          `Agent output: ${raw.slice(0, 200)}`,
+        );
+        if (text) {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  }, allImages.length > 0 ? allImages : undefined);
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+    allImages.length > 0 ? allImages : undefined,
+  );
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
@@ -434,7 +449,20 @@ async function startMessageLoop(): Promise<void> {
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          // Collect images from piped messages and translate to container paths
+          const pipeGroup = registeredGroups[chatJid];
+          const pipedImages = pipeGroup
+            ? messagesToSend
+                .flatMap((m) => m.images || [])
+                .filter((p) => fs.existsSync(p))
+                .map((hostPath) => {
+                  const gDir = resolveGroupFolderPath(pipeGroup.folder);
+                  const rel = path.relative(gDir, hostPath);
+                  return `/workspace/group/${rel}`;
+                })
+            : [];
+
+          if (queue.sendMessage(chatJid, formatted, pipedImages.length > 0 ? pipedImages : undefined)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',

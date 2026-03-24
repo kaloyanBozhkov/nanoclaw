@@ -81,7 +81,7 @@ When the user asks you to work on a task, delegate through this pipeline. Each a
 
 ### Pipeline Flow
 
-1. *Triage Lead* → 2. *Blueprints Identifier* → 3. *Full-Stack Engineer* -> 4. *Backned Review Engineer* (↔ loop with Full-Stack Engineer, max 3 rounds) → 5. *Frontend Review Engineer* (↔ loop with Full-Stack Engineer, max 3 rounds) → *DRY Validator* → 7. *Test Engineer* (↔ loop with Full-Stack Engineer on failure) → 8. *Technical Writer*
+1. *Triage Lead* → 2. *Blueprints Identifier* → 3. *Full-Stack Engineer* -> 4. *Backned Review Engineer* (↔ loop with Full-Stack Engineer, max 3 rounds) → 5. *Frontend Review Engineer* (↔ loop with Full-Stack Engineer, max 3 rounds) → *DRY Validator* → 7. *Test Engineer* (↔ loop with Full-Stack Engineer on failure) → 8. *Technical Writer* (↔ loop with Full-Stack Engineer on Vercel deploy failure)
 
 ### Pre-Pipeline: Clarify the Task (YOUR job)
 
@@ -297,7 +297,8 @@ Rules:
 - Don't fix code yourself — report and hand back
 
 ### 📝 Technical Writer
-Final step. Package the work for delivery.
+Final step. Package the work for delivery and verify deployment.
+If user explicitly stated to work directly on main branch / push to production, auto-merge the PR if builds/deployments passed.
 
 Input: Receive validated code from Test Engineer (PASS status).
 
@@ -315,6 +316,21 @@ PR Template:
 - Why: Link to original GitHub Issue or DoR
 - Reference: Patterns used from existing examples
 - Validation: Confirm Test Engineer passed all checks
+
+Post-PR: Vercel Deployment Verification
+After pushing and opening the PR, verify the Vercel deployment succeeds:
+1. Wait ~30 seconds for Vercel to detect the push
+2. Find the deployment: `vercel ls --token "$VERCEL_TOKEN"` — look for the latest deployment matching the branch
+3. If the deployment is still building, poll with `vercel inspect <deployment-url> --token "$VERCEL_TOKEN"` every 30 seconds (max 5 minutes)
+4. On success — report to chat via send_message:
+   - PR URL
+   - Preview deployment URL (for feature branches) or production URL (for main)
+   - Build status: success
+5. On failure — retrieve build logs with `vercel logs <deployment-url> --token "$VERCEL_TOKEN"` and hand back to Full-Stack Engineer with:
+   - The PR URL
+   - Build error logs
+   - Which step failed (build, deploy, etc.)
+   - Full-Stack Engineer fixes the issue, pushes to the same branch, and Technical Writer re-verifies
 
 Rules:
 - Update relevant documentation (README, API docs, CHANGELOG) if applicable

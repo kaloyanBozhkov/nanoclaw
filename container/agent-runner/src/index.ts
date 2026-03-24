@@ -311,21 +311,26 @@ function shouldClose(): boolean {
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
  */
-function drainIpcInput(): string[] {
+interface IpcMessage {
+  text: string;
+  images?: string[];
+}
+
+function drainIpcInput(): IpcMessage[] {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs.readdirSync(IPC_INPUT_DIR)
       .filter(f => f.endsWith('.json'))
       .sort();
 
-    const messages: string[] = [];
+    const messages: IpcMessage[] = [];
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+          messages.push({ text: data.text, images: data.images });
         }
       } catch (err) {
         log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
@@ -343,7 +348,7 @@ function drainIpcInput(): string[] {
  * Wait for a new IPC message or _close sentinel.
  * Returns the messages as a single string, or null if _close.
  */
-function waitForIpcMessage(): Promise<string | null> {
+function waitForIpcMessage(): Promise<IpcMessage | null> {
   return new Promise((resolve) => {
     const poll = () => {
       if (shouldClose()) {
@@ -352,7 +357,10 @@ function waitForIpcMessage(): Promise<string | null> {
       }
       const messages = drainIpcInput();
       if (messages.length > 0) {
-        resolve(messages.join('\n'));
+        // Merge all drained messages into one
+        const text = messages.map(m => m.text).join('\n');
+        const images = messages.flatMap(m => m.images || []);
+        resolve({ text, images: images.length > 0 ? images : undefined });
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
@@ -395,9 +403,13 @@ async function runQuery(
       return;
     }
     const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+    for (const msg of messages) {
+      log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
+      if (msg.images?.length) {
+        stream.pushWithImages(msg.text, msg.images);
+      } else {
+        stream.push(msg.text);
+      }
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -523,7 +535,7 @@ async function main(): Promise<void> {
     const stdinData = await readStdin();
     containerInput = JSON.parse(stdinData);
     try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
-    log(`Received input for group: ${containerInput.groupFolder}`);
+    log(`Received input for group: ${containerInput.groupFolder}, images: ${JSON.stringify(containerInput.images || [])}`);
   } catch (err) {
     writeOutput({
       status: 'error',
@@ -554,7 +566,12 @@ async function main(): Promise<void> {
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
+    prompt += '\n' + pending.map(m => m.text).join('\n');
+    // Merge any images from pending messages into containerInput
+    const pendingImages = pending.flatMap(m => m.images || []);
+    if (pendingImages.length > 0) {
+      containerInput.images = [...(containerInput.images || []), ...pendingImages];
+    }
   }
 
   // Query loop: run query → wait for IPC message → run new query → repeat
@@ -591,8 +608,10 @@ async function main(): Promise<void> {
         break;
       }
 
-      log(`Got new message (${nextMessage.length} chars), starting new query`);
-      prompt = nextMessage;
+      log(`Got new message (${nextMessage.text.length} chars, ${nextMessage.images?.length || 0} images), starting new query`);
+      prompt = nextMessage.text;
+      // Update containerInput images for the next runQuery call
+      containerInput.images = nextMessage.images;
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

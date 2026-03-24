@@ -108,9 +108,7 @@ function createSchema(database: Database.Database): void {
 
   // Add images column for image attachments (JSON array of file paths)
   try {
-    database.exec(
-      `ALTER TABLE messages ADD COLUMN images TEXT`,
-    );
+    database.exec(`ALTER TABLE messages ADD COLUMN images TEXT`);
   } catch {
     /* column already exists */
   }
@@ -338,7 +336,9 @@ export function getNewMessages(
 
   const rows = db
     .prepare(sql)
-    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as (NewMessage & { images?: string })[];
+    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as (NewMessage & {
+    images?: string;
+  })[];
 
   const messages = rows.map(parseImageColumn);
 
@@ -372,7 +372,9 @@ export function getMessagesSince(
   `;
   const rows = db
     .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as (NewMessage & { images?: string })[];
+    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as (NewMessage & {
+    images?: string;
+  })[];
   return rows.map(parseImageColumn);
 }
 

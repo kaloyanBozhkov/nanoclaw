@@ -295,7 +295,13 @@ export class TelegramChannel implements Channel {
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
 
       // Download the largest photo size to the group's images folder
       const photos = ctx.message.photo;
