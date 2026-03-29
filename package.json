@@ -15,6 +15,7 @@
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "auth": "tsx src/whatsapp-auth.ts",
+    "restart": "launchctl kickstart -k gui/$(id -u)/com.nanoclaw",
     "test": "vitest run",
     "test:watch": "vitest"
   },
