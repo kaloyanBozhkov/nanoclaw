@@ -4,6 +4,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
+  DATA_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
@@ -624,6 +625,36 @@ async function main(): Promise<void> {
     onResetSession: (groupFolder: string) => {
       deleteSession(groupFolder);
       delete sessions[groupFolder];
+
+      // Delete Claude session files so the next container starts completely fresh.
+      // Only remove session entries (UUID dirs/files), preserve memory/.
+      // container-runner.ts recreates .claude/ with settings.json on next run.
+      const projectsDir = path.join(
+        DATA_DIR,
+        'sessions',
+        groupFolder,
+        '.claude',
+        'projects',
+      );
+      try {
+        if (fs.existsSync(projectsDir)) {
+          for (const projectDir of fs.readdirSync(projectsDir)) {
+            const fullProjectDir = path.join(projectsDir, projectDir);
+            if (!fs.statSync(fullProjectDir).isDirectory()) continue;
+            for (const entry of fs.readdirSync(fullProjectDir)) {
+              if (entry === 'memory') continue; // preserve auto-memory
+              const entryPath = path.join(fullProjectDir, entry);
+              fs.rmSync(entryPath, { recursive: true, force: true });
+            }
+          }
+          logger.info({ groupFolder }, 'Claude session files cleared via /new');
+        }
+      } catch (err) {
+        logger.warn(
+          { groupFolder, err },
+          'Failed to clear Claude session files',
+        );
+      }
     },
     registeredGroups: () => registeredGroups,
   };
