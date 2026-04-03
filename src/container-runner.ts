@@ -97,7 +97,6 @@ function buildVolumeMounts(
       containerPath: '/workspace/group',
       readonly: false,
     });
-
   } else {
     // Other groups only get their own folder
     mounts.push({
