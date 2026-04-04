@@ -221,6 +221,7 @@ Review Checklist (frontend code):
 - Code is modularized.
 - Modules live in expected folders
 - No unecessarily duplicated folders (e.g. src/utils, src/libs, src/helpers which can be under just src/utils).
+- if project has localization there's no untranslated labels/text/keys.
 
 Severity Levels:
 - Blocker: Must fix. Broken logic, security issue, crashes, data loss risk, inconsistent patterns.

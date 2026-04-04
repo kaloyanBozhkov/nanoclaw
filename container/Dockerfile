@@ -33,8 +33,8 @@ RUN apt-get update && apt-get install -y \
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser, claude-code, Context7, and Playwright MCP globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code @upstash/context7-mcp@latest @playwright/mcp@latest vercel
+# Install pnpm and global tools
+RUN npm install -g pnpm agent-browser @anthropic-ai/claude-code @upstash/context7-mcp@latest @playwright/mcp@latest @playwright/test@latest vercel
 RUN npx playwright install --with-deps chromium
 
 # Create app directory
