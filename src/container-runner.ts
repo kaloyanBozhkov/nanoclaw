@@ -137,28 +137,26 @@ function buildVolumeMounts(
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(
-      settingsFile,
-      JSON.stringify(
-        {
-          env: {
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-          },
-        },
-        null,
-        2,
-      ) + '\n',
-    );
-  }
+  const desiredSettings = {
+    env: {
+      // Enable agent swarms (subagent orchestration)
+      // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+      // Load CLAUDE.md from additional mounted directories
+      // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
+      CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+      // Enable Claude's memory feature (persists user preferences between sessions)
+      // https://code.claude.com/docs/en/memory#manage-auto-memory
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+    },
+    // Auto-approve project MCP servers (.mcp.json) without interactive prompt
+    enableAllProjectMcpServers: true,
+  };
+  // Always overwrite to keep settings in sync with host configuration
+  fs.writeFileSync(
+    settingsFile,
+    JSON.stringify(desiredSettings, null, 2) + '\n',
+  );
 
   // Sync skills from container/skills/ into each group's .claude/skills/
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
@@ -265,6 +263,12 @@ function buildContainerArgs(
   if (vercelToken) {
     args.push('-e', `VERCEL_TOKEN=${vercelToken}`);
   }
+
+  // Pass Pencil MCP URL so container agents can connect to host Pencil MCP server
+  args.push(
+    '-e',
+    `PENCIL_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:3102/mcp`,
+  );
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());

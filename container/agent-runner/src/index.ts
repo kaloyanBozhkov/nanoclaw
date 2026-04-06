@@ -463,7 +463,8 @@ async function runQuery(
         'NotebookEdit',
         'mcp__nanoclaw__*',
         'mcp__context7__*',
-        'mcp__playwright__*'
+        'mcp__playwright__*',
+        'mcp__pencil__*'
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -487,6 +488,12 @@ async function runQuery(
           command: 'npx',
           args: ['@playwright/mcp@latest', '--headless'],
         },
+        ...(process.env.PENCIL_MCP_URL ? {
+          pencil: {
+            type: 'http',
+            url: process.env.PENCIL_MCP_URL,
+          } as any,
+        } : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
