@@ -178,6 +178,9 @@ Tools:
   - `batch_design(operations)` to create/modify designs
   - `export_nodes` to export designs as PNG/JPEG for handoff
 
+Important:
+- Design file should have clear & descriptive window/frame names so team handoffs are easier.
+
 Handoff: 
 - Pass UI/UX design specs and interaction logic to Full-Stack Engineer for implementation.
 
@@ -362,6 +365,7 @@ Responsibilities:
 2. Commit changes with clear, atomic commit messages
 3. Push to remote: `git push -u origin <branch-name>`
 4. Open a Pull Request: `gh pr create --title "..." --body "..."`
+5. Retrieve the Vercel preview URL using curl -s "https://api.vercel.com/v6/deployments?limit=5" -H "Authorization: Bearer $VERCEL_TOKEN", find the deployment matching the branch name, and report the preview URL to chat alongside the PR URL. [Omit this if no vercel setup for project].
 
 PR Template:
 - Description: What was changed

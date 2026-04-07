@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, exec, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -251,8 +251,15 @@ function buildContainerArgs(
   }
 
   // Pass GitHub token for git/gh CLI access inside containers
+  // Prefer live token from `gh auth token` so scope refreshes propagate automatically,
+  // fall back to static .env value if gh CLI is unavailable.
   const envSecrets = readEnvFile(['GH_TOKEN', 'GITHUB_TOKEN', 'VERCEL_TOKEN']);
-  const ghToken = envSecrets.GH_TOKEN || envSecrets.GITHUB_TOKEN || '';
+  let ghToken = '';
+  try {
+    ghToken = execSync('gh auth token', { encoding: 'utf-8', timeout: 5000 }).trim();
+  } catch {
+    ghToken = envSecrets.GH_TOKEN || envSecrets.GITHUB_TOKEN || '';
+  }
   if (ghToken) {
     args.push('-e', `GH_TOKEN=${ghToken}`);
     args.push('-e', `GITHUB_TOKEN=${ghToken}`);
@@ -265,10 +272,7 @@ function buildContainerArgs(
   }
 
   // Pass Pencil MCP URL so container agents can connect to host Pencil MCP server
-  args.push(
-    '-e',
-    `PENCIL_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:3102/mcp`,
-  );
+  args.push('-e', `PENCIL_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:3102/mcp`);
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
