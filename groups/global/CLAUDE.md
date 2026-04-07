@@ -99,7 +99,9 @@ When the user messages, clarify the goal/issue/task if it's not already clear, t
 
 *Blueprint Extractor* — call when the user says things like "extract a blueprint for [feature] from [project]". It reads a codebase, analyzes a feature, and saves a reusable blueprint.
 
-*E2E QA Engineer* — call when the user says things like "test [feature]", "QA this", "check if [X] works", or "run E2E tests". Spins up the app and uses Playwright to interact with it like a real user. If e2e scripts exist and user said "test e2e" then run the e2e script. 
+*E2E QA Engineer* — call when the user says things like "test [feature]", "QA this", "check if [X] works", or "run E2E tests". Spins up the app and uses Playwright to interact with it like a real user. If e2e scripts exist and user said "test e2e" then run the e2e script.
+
+*GitHub Project Manager* - Call when user says things like "let's plan isues", "let's look at issues on github", "we have new designs and should organise our work with github issues". Reads github project's issues, checks current codebase state (schema, folder structure + last few commits) and importantly also the design file in order to setup github project issues.
 
 ---
 
@@ -446,6 +448,66 @@ Rules:
 - Report issues clearly with reproduction steps, don't just say "it's broken"
 - If the app fails to start, report the error logs immediately
 
+### 📋 GitHub Project Manager (Standalone)
+Analyzes a product's design file and codebase, then organizes structured GitHub issues on a project board — ordered by implementation sequence, aligned with CODE_BIBLE.md conventions, and linked to blueprints.
+
+Input:
+- GitHub repo (owner/repo)
+- GitHub project ID (numeric)
+- Project directory path
+- Design file path (for Pencil MCP)
+- Blueprints directory (`/workspace/blueprints/`)
+
+Process:
+
+*1. Design Analysis*
+- Open design file via `mcp__pencil__open_document` (called "design.pen" & at repo top level usually)
+- List all screens with `mcp__pencil__batch_get`
+- Group screens by section/feature to understand the full product surface area
+- Map each screen to: feature name, user type (coach/athlete/admin), core actions, data entities involved
+
+*2. Codebase Audit*
+- Read `prisma/schema.prisma` — identify existing models
+- Scan `src/server/actions/`, `src/server/queries/`, `src/app/` — identify what's already built
+- Check `src/lib/` or `src/utils/`, `src/middleware.ts` or `srx/proxy.ts`, `src/app/_components/` for scaffolded infrastructure
+- Produce a "done / not done" status for each feature area
+
+*3. Issue Planning*
+- Pick implementation order using Critical Path First:
+  Foundation (schema, theme, atoms) → Auth → Landing → Core entity CRUD → Sub-features → Athlete-facing flows → Cross-cutting (i18n, analytics, messaging)
+- For each issue:
+  - Title: clear, imperative (`Add coach profile page`)
+  - Body sections: Overview, Design Reference (screen name + Pencil frame ID), User Stories, DB subtasks, API subtasks, FE subtasks, Acceptance Criteria
+  - CODE BIBLE-aligned paths: `src/server/actions/[category]/verb.action.ts`, `src/server/queries/[table]/verb.query.ts`, component hierarchy (atoms → molecules → organisms)
+  - Blueprint reference if a matching blueprint exists in `/workspace/blueprints/`
+  - Label: `feature`, `bug`, `infra`, `design`, or `epic`
+
+*4. Issue Creation*
+- Create issues via `gh issue create -R owner/repo --title "..." --body "..."`
+- Create epics last (one per major section), then link children as sub-issues:
+  - Get child `databaseId` via GraphQL: `gh api graphql -f query='{ repository(owner:"X", name:"Y") { issue(number:N) { databaseId } } }'`
+  - Link: `gh api repos/owner/repo/issues/PARENT/sub_issues -f sub_issue_id=CHILD_DB_ID`
+- Add all issues to project board: `gh project item-add PROJECT_ID --owner OWNER --url ISSUE_URL`
+
+*5. Board Cleanup (if re-ordering)*
+- List current board items: `gh project item-list PROJECT_ID --owner OWNER --format json`
+- Remove stale/duplicate items: `gh project item-delete PROJECT_ID --owner OWNER --id ITEM_ID`
+- Move items to correct status column via project field update
+
+Output:
+- Summary of issues created (count by category)
+- List of epics with linked sub-issues
+- Codebase audit table: feature → done/not done
+- Project board URL
+
+Rules:
+- Never create duplicate issues — search existing before creating: `gh issue list -R owner/repo --search "keyword" --state all`
+- Never close issues without user confirmation
+- Issue numbers should reflect implementation order — create in sequence, foundations first
+- Sub-issue API requires integer `databaseId`, NOT the string node ID (`I_kwDO...`)
+- Never bulk-replace colors or modify existing design screens — read-only on existing frames
+- If codebase audit finds something already done, mark the issue as closed immediately after creation with a note
+- Loop limit on sub-issue linking failures: max 3 retries per issue, then report and skip
 
 ---
 

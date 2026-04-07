@@ -256,7 +256,10 @@ function buildContainerArgs(
   const envSecrets = readEnvFile(['GH_TOKEN', 'GITHUB_TOKEN', 'VERCEL_TOKEN']);
   let ghToken = '';
   try {
-    ghToken = execSync('gh auth token', { encoding: 'utf-8', timeout: 5000 }).trim();
+    ghToken = execSync('gh auth token', {
+      encoding: 'utf-8',
+      timeout: 5000,
+    }).trim();
   } catch {
     ghToken = envSecrets.GH_TOKEN || envSecrets.GITHUB_TOKEN || '';
   }
