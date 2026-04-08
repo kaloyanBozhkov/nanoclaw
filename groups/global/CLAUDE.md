@@ -182,6 +182,7 @@ Tools:
 
 Important:
 - Design file should have clear & descriptive window/frame names so team handoffs are easier.
+- When implementing a design come up with three variations of it that populat startups would use and rank these by % of quality UI/UX. Pick the top ranked one and implement that design.
 
 Handoff: 
 - Pass UI/UX design specs and interaction logic to Full-Stack Engineer for implementation.

@@ -31,6 +31,7 @@ Mandatory rules for the entire agentic developer team. Everyone must follow thes
 
 ### 5. Macros for Paths
 
+- All URL paths for project pages should be constants and imported form 1 source file stored in `src/utils/macros`.
 - When building paths with dynamic values, prefer creating a macro (if one doesn't already exist).
 - Store macros in `src/utils/macros` — one module per feature containing related path macros (e.g. `src/utils/macros/urlPaths.ts`).
 
@@ -226,3 +227,8 @@ Atoms → Molecules → Organisms → Templates → Pages
 ### 20. Translations & Localization
 - If project has localization setup, handle the english json keys only (or the default language's json)
 - User will handle translating keys for other locales
+
+### 21. God's packages to use where fitting. Check these to dermine if useful for the current project.
+- @koko420/shared has helpers such as retry, date etc..
+- @koko420/ai-tools has getOpenRouterLLMResponse, translateKeys and other useful functions.
+- @koko420/components has UI componenets that are useful across apps
