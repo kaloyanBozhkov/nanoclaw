@@ -39,9 +39,9 @@ Note: mood lamp (off/on) is refferring to living-room-mood-lamp.on/off
 | Screen off | `tv.screen_off` | — | "turn tv off" means screen off, not fully off. User will almost always want tv turned off unless explicitly says screen off |
 | Set volume | `tv.volume` | `number` | |
 | Play YouTube | `tv.youtube` | `videoId or search string` | |
-| Open Spotify on TV | `tv.spotify` | `search string` | |
+| Open Spotify app on TV | `tv.spotify` | `search string` | |
 | Play song via Spotify | `tv.play_spotify` | `song name` | "Play song X" assumes TV by default so use this command  |
-| Play song + dim lights | `tv.play_spotify_dim` | `brightness color song` | "Play song x and vibe" assumes this command |
+| Play song + dim lights | `tv.play_spotify_dim` | `brightness color song` | "Play song x and vibe" or "Play x and dim" assumes this command |
 | Pause Spotify | `tv.pause_spotify` | — | |
 | Resume Spotify | `tv.resume_spotify` | — | |
 | Open app | `tv.app` | `appId or appName` | |

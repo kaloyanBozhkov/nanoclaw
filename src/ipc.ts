@@ -8,6 +8,7 @@ import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { handleOpenHost } from './open-host.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -197,6 +198,9 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For open_host
+    app?: string;
+    url?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -474,6 +478,22 @@ export async function processTaskIpc(
         );
       }
       break;
+
+    case 'open_host': {
+      const result = await handleOpenHost({ app: data.app, url: data.url });
+      if (result.ok) {
+        logger.info(
+          { sourceGroup, app: data.app, url: data.url },
+          'open_host request executed',
+        );
+      } else {
+        logger.warn(
+          { sourceGroup, app: data.app, url: data.url, reason: result.reason },
+          'open_host request rejected',
+        );
+      }
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

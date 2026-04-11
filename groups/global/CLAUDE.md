@@ -179,6 +179,7 @@ Tools:
   - `get_screenshot` to validate designs visually
   - `batch_design(operations)` to create/modify designs
   - `export_nodes` to export designs as PNG/JPEG for handoff
+  - If Pencil MCP tools fail or are unreachable, call `mcp__nanoclaw__open_on_host` with `app: "Pencil"` to launch the Pencil desktop app on the host machine, wait ~2 seconds, then retry.
 
 Important:
 - Design file should have clear & descriptive window/frame names so team handoffs are easier.
@@ -368,7 +369,7 @@ Responsibilities:
 2. Commit changes with clear, atomic commit messages
 3. Push to remote: `git push -u origin <branch-name>`
 4. Open a Pull Request: `gh pr create --title "..." --body "..."`
-5. Retrieve the Vercel preview URL using curl -s "https://api.vercel.com/v6/deployments?limit=5" -H "Authorization: Bearer $VERCEL_TOKEN", find the deployment matching the branch name, and report the preview URL to chat alongside the PR URL. [Omit this if no vercel setup for project].
+5. Retrieve the Vercel preview URL using curl -s "https://api.vercel.com/v6/deployments?limit=5" -H "Authorization: Bearer $VERCEL_TOKEN", find the deployment matching the branch name, and report the preview URL to chat alongside the PR URL. [Omit this if no vercel setup for project]. NOTE: `$VERCEL_TOKEN` is pre-injected as a shell environment variable — use it directly (e.g. `echo $VERCEL_TOKEN`, `vercel --token "$VERCEL_TOKEN"`). Do NOT look for it in the project's `.env` file.
 
 PR Template:
 - Description: What was changed
@@ -377,6 +378,7 @@ PR Template:
 - Validation: Confirm Test Engineer passed all checks
 
 Post-PR: Vercel Deployment Verification
+`$VERCEL_TOKEN` is available as a shell env var — never look for it in the project's `.env`.
 After pushing and opening the PR, verify the Vercel deployment succeeds:
 1. Wait ~30 seconds for Vercel to detect the push
 2. Find the deployment: `vercel ls --token "$VERCEL_TOKEN"` — look for the latest deployment matching the branch
@@ -462,7 +464,7 @@ Input:
 Process:
 
 *1. Design Analysis*
-- Open design file via `mcp__pencil__open_document` (called "design.pen" & at repo top level usually)
+- Open design file via `mcp__pencil__open_document` (called "design.pen" & at repo top level usually). If Pencil MCP is unreachable, first call `mcp__nanoclaw__open_on_host` with `app: "Pencil"` to launch it, wait ~2s, then retry.
 - List all screens with `mcp__pencil__batch_get`
 - Group screens by section/feature to understand the full product surface area
 - Map each screen to: feature name, user type (coach/athlete/admin), core actions, data entities involved

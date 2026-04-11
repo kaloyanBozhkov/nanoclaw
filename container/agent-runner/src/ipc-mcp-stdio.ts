@@ -360,6 +360,50 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+server.tool(
+  'open_on_host',
+  `Ask the host machine (your user's Mac) to open a desktop app or URL via macOS \`open\`. Use this when an MCP server you depend on requires a host-side application to be running — for example, the Pencil MCP server requires the Pencil desktop app to be open.
+
+Provide EITHER \`app\` (a macOS application name like "Pencil") OR \`url\` (an http/https URL like "https://pencil.dev"), not both.
+
+Targets are validated against a host-side allowlist (~/.config/nanoclaw/open-allowlist.json). Defaults allow only Pencil.app and https://pencil.dev — if you need something else, the user must add it to the allowlist. This tool is only effective on macOS hosts.
+
+This is fire-and-forget: success means the request was queued, not that the app finished launching. Wait briefly (1-2s) before retrying the dependent operation.`,
+  {
+    app: z.string().optional().describe('macOS application name to launch (e.g. "Pencil"). Mutually exclusive with `url`.'),
+    url: z.string().optional().describe('http(s) URL to open in the default browser (e.g. "https://pencil.dev"). Mutually exclusive with `app`.'),
+  },
+  async (args) => {
+    if (!args.app && !args.url) {
+      return {
+        content: [{ type: 'text' as const, text: 'Error: must provide either `app` or `url`.' }],
+        isError: true,
+      };
+    }
+    if (args.app && args.url) {
+      return {
+        content: [{ type: 'text' as const, text: 'Error: provide only one of `app` or `url`.' }],
+        isError: true,
+      };
+    }
+
+    const data: Record<string, string | undefined> = {
+      type: 'open_host',
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+    if (args.app) data.app = args.app;
+    if (args.url) data.url = args.url;
+
+    writeIpcFile(TASKS_DIR, data);
+
+    const target = args.app ? `app "${args.app}"` : `url "${args.url}"`;
+    return {
+      content: [{ type: 'text' as const, text: `Open request for ${target} sent to host. Wait ~1-2s before using the dependent tool.` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
