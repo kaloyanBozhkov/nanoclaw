@@ -142,6 +142,30 @@ export class GroupQueue {
   }
 
   /**
+   * Return the active container's process + name for a group, or null if
+   * nothing is running. Used by the /stop handler to issue a hard kill.
+   */
+  getActiveContainer(
+    groupJid: string,
+  ): { proc: ChildProcess; containerName: string; groupFolder: string } | null {
+    const state = this.groups.get(groupJid);
+    if (
+      !state ||
+      !state.active ||
+      !state.process ||
+      !state.containerName ||
+      !state.groupFolder
+    ) {
+      return null;
+    }
+    return {
+      proc: state.process,
+      containerName: state.containerName,
+      groupFolder: state.groupFolder,
+    };
+  }
+
+  /**
    * Mark the container as idle-waiting (finished work, waiting for IPC input).
    * If tasks are pending, preempt the idle container immediately.
    */

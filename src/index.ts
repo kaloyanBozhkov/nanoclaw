@@ -1,3 +1,4 @@
+import { exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -10,6 +11,7 @@ import {
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
+import { stopContainer } from './container-runtime.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
 import {
@@ -236,6 +238,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     prompt,
     chatJid,
     async (result) => {
+      // Heartbeat from a long tool call — keep the idle timer alive but
+      // don't send anything to the user and don't notify the queue as idle.
+      if (result.heartbeat) {
+        resetIdleTimer();
+        return;
+      }
       // Streaming output callback — called for each agent result
       if (result.result) {
         const raw =
@@ -291,6 +299,87 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   return true;
+}
+
+/**
+ * Read the most recent assistant activity from the SDK transcript so we can
+ * tell the user what the agent was doing when /stop hit. Returns null when no
+ * transcript exists for the group's current session.
+ */
+function extractLastActivity(
+  groupFolder: string,
+  sessionId: string,
+): {
+  lastText: string | null;
+  lastTool: { name: string; input: unknown } | null;
+} | null {
+  const projectsDir = path.join(
+    DATA_DIR,
+    'sessions',
+    groupFolder,
+    '.claude',
+    'projects',
+  );
+  if (!fs.existsSync(projectsDir)) return null;
+
+  let transcriptPath: string | null = null;
+  for (const project of fs.readdirSync(projectsDir)) {
+    const candidate = path.join(projectsDir, project, `${sessionId}.jsonl`);
+    if (fs.existsSync(candidate)) {
+      transcriptPath = candidate;
+      break;
+    }
+  }
+  if (!transcriptPath) return null;
+
+  const content = fs.readFileSync(transcriptPath, 'utf-8');
+  const lines = content.split('\n').filter((l) => l.trim());
+
+  let lastText: string | null = null;
+  let lastTool: { name: string; input: unknown } | null = null;
+
+  // Walk the tail of the transcript so we always pick up the most recent
+  // text + tool_use blocks regardless of how many turns happened.
+  for (const line of lines.slice(-100)) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry.type !== 'assistant' || !entry.message?.content) continue;
+      const blocks = Array.isArray(entry.message.content)
+        ? entry.message.content
+        : [];
+      for (const block of blocks) {
+        if (block.type === 'text' && block.text) {
+          lastText = block.text;
+        } else if (block.type === 'tool_use') {
+          lastTool = { name: block.name, input: block.input };
+        }
+      }
+    } catch {
+      /* skip malformed line */
+    }
+  }
+
+  return { lastText, lastTool };
+}
+
+function formatStopSummary(
+  activity: ReturnType<typeof extractLastActivity>,
+): string {
+  const parts: string[] = ['⛔ Stopped.'];
+  if (activity?.lastText) {
+    const snippet = activity.lastText.slice(0, 400);
+    parts.push(
+      `\n*Last message:*\n${snippet}${activity.lastText.length > 400 ? '…' : ''}`,
+    );
+  }
+  if (activity?.lastTool) {
+    const inputStr = JSON.stringify(activity.lastTool.input).slice(0, 200);
+    parts.push(
+      `\n*Last action:* \`${activity.lastTool.name}\`\n\`${inputStr}\``,
+    );
+  }
+  parts.push('\nReply with what to do next, or send new instructions.');
+  return parts.join('\n');
 }
 
 async function runAgent(
@@ -362,6 +451,20 @@ async function runAgent(
     }
 
     if (output.status === 'error') {
+      // If the session was not found, clear it so the next attempt starts fresh
+      // instead of retrying the dead session forever.
+      if (
+        output.error &&
+        /no conversation found/i.test(output.error) &&
+        sessions[group.folder]
+      ) {
+        logger.warn(
+          { group: group.name, sessionId: sessions[group.folder] },
+          'Clearing dead session after "No conversation found" error',
+        );
+        deleteSession(group.folder);
+        delete sessions[group.folder];
+      }
       logger.error(
         { group: group.name, error: output.error },
         'Container agent error',
@@ -543,6 +646,45 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
+  // Handle /stop command — hard-kill the running container and tell the user
+  // where the agent was, so they can resume by sending the next message.
+  async function handleStop(chatJid: string): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    const info = queue.getActiveContainer(chatJid);
+    if (!info) {
+      await channel.sendMessage(chatJid, '⚠️ Nothing running to stop.');
+      return;
+    }
+
+    // Read transcript BEFORE killing so we have the agent's most recent state.
+    const sessionId = sessions[group.folder];
+    const activity = sessionId
+      ? extractLastActivity(group.folder, sessionId)
+      : null;
+
+    logger.info(
+      { chatJid, containerName: info.containerName },
+      '/stop received, killing container',
+    );
+
+    // Graceful runtime stop first, force-kill the host child as a fallback.
+    exec(stopContainer(info.containerName), { timeout: 10000 }, (err) => {
+      if (err && !info.proc.killed) {
+        logger.warn(
+          { chatJid, containerName: info.containerName, err },
+          'Graceful stop failed, force-killing host process',
+        );
+        info.proc.kill('SIGKILL');
+      }
+    });
+
+    await channel.sendMessage(chatJid, formatStopSummary(activity));
+  }
+
   // Handle /remote-control and /remote-control-end commands
   async function handleRemoteControl(
     command: string,
@@ -597,6 +739,15 @@ async function main(): Promise<void> {
         return;
       }
 
+      // /stop — manual cancel of the active container, intercepted before
+      // storage so it never reaches the agent or the message log.
+      if (trimmed === '/stop') {
+        handleStop(chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Stop command error'),
+        );
+        return;
+      }
+
       // Sender allowlist drop mode: discard messages from denied senders before storing
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
         const cfg = loadSenderAllowlist();
@@ -625,6 +776,15 @@ async function main(): Promise<void> {
     onResetSession: (groupFolder: string) => {
       deleteSession(groupFolder);
       delete sessions[groupFolder];
+
+      // Kill the running container so it doesn't resume the dead session.
+      // Find the JID for this group folder and signal the container to stop.
+      for (const [jid, group] of Object.entries(registeredGroups)) {
+        if (group.folder === groupFolder) {
+          queue.closeStdin(jid);
+          break;
+        }
+      }
 
       // Delete Claude session files so the next container starts completely fresh.
       // Only remove session entries (UUID dirs/files), preserve memory/.

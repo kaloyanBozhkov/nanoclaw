@@ -36,7 +36,11 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  /** Liveness ping during long tool calls — host resets idle/hard timers, no result shown to user. */
+  heartbeat?: boolean;
 }
+
+const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 
 interface SessionEntry {
   sessionId: string;
@@ -149,6 +153,18 @@ function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
+}
+
+/**
+ * Emit a liveness marker every HEARTBEAT_INTERVAL_MS while a query is running.
+ * The host parses this marker and resets the container hard timeout + host idle
+ * timer, so long-running tool calls (E2E tests, big builds) don't get killed.
+ */
+function startHeartbeat(): () => void {
+  const id = setInterval(() => {
+    writeOutput({ status: 'success', result: null, heartbeat: true });
+  }, HEARTBEAT_INTERVAL_MS);
+  return () => clearInterval(id);
 }
 
 function log(message: string): void {
@@ -443,6 +459,8 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
+  const stopHeartbeat = startHeartbeat();
+  try {
   for await (const message of query({
     prompt: stream,
     options: {
@@ -528,6 +546,9 @@ async function runQuery(
         newSessionId
       });
     }
+  }
+  } finally {
+    stopHeartbeat();
   }
 
   ipcPolling = false;
@@ -623,10 +644,14 @@ async function main(): Promise<void> {
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Agent error: ${errorMessage}`);
+    // Don't re-persist the session ID if the conversation was not found —
+    // returning it would cause the host to save a dead session, creating
+    // an infinite retry loop after /new clears session files.
+    const isDeadSession = /no conversation found/i.test(errorMessage);
     writeOutput({
       status: 'error',
       result: null,
-      newSessionId: sessionId,
+      newSessionId: isDeadSession ? undefined : sessionId,
       error: errorMessage
     });
     process.exit(1);
