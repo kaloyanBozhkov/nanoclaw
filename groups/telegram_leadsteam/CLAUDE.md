@@ -2,15 +2,24 @@
 
 ## Purpose
 
-Lead generation workspace. Given a business profile (**what** trade, **where**, **how many**), return contact details the team can reach out to.
+Lead generation workspace. Given a business profile (**what** trade, **where**, **how many**), return **WhatsApp-reachable** businesses with their website and contact details. The team reaches out on WhatsApp, so the N the user asks for are specifically WhatsApp-reachable leads.
 
-Typical request shape: *"Find N {trade} in {city/region}. Include name, phone, email, website, address, and the best contact channel."*
+But: parsed contact info is valuable even without WhatsApp. So candidates that pass enrichment but fail the WhatsApp filter are **not dropped** — they're persisted to a secondary list (`no-whatsapp.csv`) for later use. Nothing that cost us a Jina turn to parse gets thrown away.
+
+Two hard requirements for the **primary** output (`contacts.csv`):
+1. **Website** — the business's own domain (not an aggregator listing). If you can't find the website, the candidate goes nowhere.
+2. **WhatsApp** — a `wa.me/…`, `api.whatsapp.com/…`, `/whatsapp/` link, or an extractable "WhatsApp" link on the business's own site.
+
+Candidates that have a website and phone/email but **no** WhatsApp signal → save to `no-whatsapp.csv`. Candidates that fail even the website check → don't persist.
+
+Typical request shape: *"Find N {trade} in {city/region} that use WhatsApp."*
 
 ## Working directory
 
 - Group folder: `/workspace/group/` — use `leads/` subfolder for persisted output
 - **Search profile**: `/workspace/group/search-profile.json` (persistent — defines what we're hunting)
-- Master contact list: `/workspace/group/leads/contacts.csv` (append/update across sessions)
+- **Primary list** (WhatsApp-reachable, what the team actions): `/workspace/group/leads/contacts.csv`
+- **Secondary list** (enriched but no WhatsApp found — still valuable): `/workspace/group/leads/no-whatsapp.csv`
 - Per-run exports: `/workspace/group/leads/{YYYY-MM-DD}-{slug}.csv`
 - No repo mount. This group is workflow-only.
 
@@ -75,32 +84,44 @@ Use it surgically, not by default.
 
 ## How to handle a lead request
 
-**Budget before you start**: target **~N+5 tool turns total for N leads**. If you blow past 3× that, stop and report what you have — the approach is wrong for that request and you should ask for guidance instead of burning more turns.
+**Budget before you start**: target **~3N + 5 tool turns total for N final leads** (over-fetch because most businesses won't have WhatsApp on their site). If you blow past 2× that, stop and report what you have — the approach is wrong and you should ask for guidance instead of burning more turns.
 
 ### Phase A — discovery (1–2 tool turns target)
 
 1. **Load the profile.** Trade and location come from `search-profile.json` (see above). If the user specified a count in the message, use it; otherwise ask once for the count and wait. Don't start searching blind.
 2. **Find candidates** via `s.jina.ai`:
    ```bash
-   Q="{business_type} {location} contact website"
+   Q="{business_type} {location} whatsapp site contact"
    curl -sSL "https://s.jina.ai/$(printf %s "$Q" | jq -sRr @uri)"
    ```
-   Scan the markdown for business names + homepage URLs. Collect **2N candidates** so you can afford to drop bad matches in Phase B.
-   - If results look thin or dominated by aggregators (Yelp/Tripadvisor/etc.), pivot to the country-specific directory (see Tools) wrapped in `r.jina.ai/`.
+   Including `whatsapp` in the query biases results toward sites that actually surface it. Scan the markdown for business names + **their own website URLs** (not aggregator listings). Collect **~5N candidates** — expect most to not have WhatsApp.
+   - Drop any candidate without a discoverable own-domain website at this stage. An aggregator-only listing is not a lead.
+   - If results look thin or dominated by aggregators, pivot to the country-specific directory (see Tools) wrapped in `r.jina.ai/`.
    - Only escalate to `agent-browser` on Google Maps if `s.jina.ai` **and** the country directory both fail.
 
-### Phase B — enrichment (target 1 tool turn per lead)
+### Phase B — enrichment + WhatsApp split (target 1 tool turn per candidate)
 
-3. For each candidate homepage, run **one** `curl -sSL "https://r.jina.ai/<homepage>"` and extract in the same reasoning turn:
-   - **Phone** — match `tel:[+0-9 ().-]{7,}` or visible E.164-ish patterns
-   - **WhatsApp** — match `wa\.me/[0-9+]+`, `api\.whatsapp\.com/send\?phone=[0-9+]+`, any `/whatsapp/` path, or the literal word "WhatsApp" adjacent to a phone number
+Every candidate that makes it to this phase gets fully parsed once — no re-fetching. Based on what the parse finds, the row is routed into one of two files.
+
+3. For each candidate, fetch the homepage: `curl -sSL "https://r.jina.ai/<homepage>"`. In the **same** reasoning turn, extract everything you can:
+   - **`name`** — business name from the page `<title>`, H1, or the search-result entry
+   - **`website`** — the homepage URL you just fetched (mandatory; if there's no own-domain URL, drop the candidate — it shouldn't have gotten here)
+   - **WhatsApp** signals:
+     - `wa\.me/[0-9+]+`
+     - `api\.whatsapp\.com/send\?phone=[0-9+]+`
+     - any `/whatsapp/` path or `href="whatsapp:…"`
+   - **Phone** — any `tel:` link or visible E.164 number
    - **Email** — `mailto:` links or visible addresses
    - **Address** — postal code + city pattern
-4. If the homepage has no phone, fetch **one** fallback page: `r.jina.ai/<homepage>/contact` (or `/contact-us`, `/about`). Do **not** walk more than 2 pages per site — if still empty, mark `confidence=low`, note "no contact info on site", and move on.
-5. **Normalize phone numbers** to E.164 (`+<country><number>`, no spaces). If the country code isn't obvious from the business's location, leave `phone_e164` blank rather than guessing.
-6. **Dedupe against `contacts.csv`** — match on `phone_e164` first, then website domain, then `name+city`. Update existing rows rather than creating duplicates; bump `last_checked` and fill in previously blank fields.
-7. **Qualify.** Drop entries that clearly don't match the trade or location. Ambiguous ones go in the summary message under `needs_review`, not silently into the list.
-8. **Deliver.** Append/update `contacts.csv`, write the per-run export under `/workspace/group/leads/{YYYY-MM-DD}-{slug}.csv`, and send a short summary: how many new, how many updated, how many had WhatsApp, and any gaps.
+4. **If no WhatsApp signal on the homepage and no phone either**, fetch **one** fallback page: `r.jina.ai/<homepage>/contact` (or `/contact-us`, `/about`). Re-run the same extraction. Do not walk more than 2 pages per candidate.
+5. **Route the candidate**:
+   - **Has WhatsApp** (extractable `wa.me` / `api.whatsapp.com` / `whatsapp:` link) → write to **`contacts.csv`**. Set `whatsapp_number` to the normalized E.164 from the link. If `phone_e164` is blank, copy `whatsapp_number` into it.
+   - **No WhatsApp but has website + (phone OR email)** → write to **`no-whatsapp.csv`** (same schema, `whatsapp_number` blank). This is still valuable enriched data for later outreach via phone/email.
+   - **No website, no phone, no email** → don't persist. Parse failed, nothing to save.
+6. **Dedupe**. When writing to `contacts.csv`, dedupe on `whatsapp_number` first, then website domain, then `name+city`. When writing to `no-whatsapp.csv`, dedupe on website domain, then `phone_e164`, then `name+city`. Also check whether a candidate already exists in the *other* file — if a row is in `no-whatsapp.csv` and you just found WhatsApp for it, **move it** to `contacts.csv` (remove from the no-whatsapp file, insert into the primary file) and bump `last_checked`.
+7. **Qualify.** Drop candidates that clearly don't match the trade or location (wrong industry, wrong city). Ambiguous ones go in the summary message under `needs_review`, not silently into either file.
+8. **Stop when you've filtered N qualifying WhatsApp leads into `contacts.csv`** — don't keep enriching candidates just to pad `no-whatsapp.csv`. Under-delivering is fine: if you only found M<N WhatsApp-reachable businesses after burning the candidate pool, report `M found, N requested` and suggest broadening the location or trade.
+9. **Deliver.** Append/update both files, write the per-run export under `/workspace/group/leads/{YYYY-MM-DD}-{slug}.csv` (**only the WhatsApp-reachable rows** — the per-run export mirrors `contacts.csv`), and send a short summary: how many new WhatsApp leads, how many went to no-whatsapp, how many were updated, and any gaps.
 
 ### When to escalate to `agent-browser`
 
@@ -111,34 +132,45 @@ Only if one of these is true for a specific site, and only for that site — don
 
 ## Output format
 
-Master file `contacts.csv` columns:
+Both files share the same schema:
 
 ```
-name,trade,city,country,phone,phone_e164,whatsapp,whatsapp_number,email,website,address,source,confidence,last_checked,notes
+name,trade,city,country,website,whatsapp_number,phone,phone_e164,email,address,source,confidence,last_checked,notes
 ```
 
-- `phone` — as displayed on the site (human-readable)
-- `phone_e164` — normalized, or blank if unsure
-- `whatsapp` — `yes` / `no` / `unknown` (did the site actually surface a WhatsApp link/button?)
-- `whatsapp_number` — the number extracted from the `wa.me` / `api.whatsapp.com` link, E.164, or blank
-- `confidence` — `high` / `medium` / `low`: how confident you are the contact is current and reachable
+- **`website`** — the business's own domain (homepage URL). **Mandatory in both files. Never blank.** If you don't have it, the row doesn't exist in either file.
+- **`whatsapp_number`** — E.164 number extracted from the `wa.me/…` or `api.whatsapp.com/send?phone=…` link.
+  - In **`contacts.csv`**: mandatory, never blank.
+  - In **`no-whatsapp.csv`**: always blank (by definition).
+- `phone` — as displayed on the site (human-readable), or blank
+- `phone_e164` — normalized phone. In `contacts.csv` this may be a copy of `whatsapp_number` if the site only exposed WhatsApp; in `no-whatsapp.csv` it's the plain phone from the site.
+- `confidence` — `high` / `medium` / `low`: how current/reachable you think the contact is
 - `last_checked` — ISO date of the most recent visit
-- `source` — URL of the page where you found the contact info (not just the homepage)
-- Leave cells blank rather than guessing. Never fabricate phone numbers, emails, or WhatsApp links.
+- `source` — URL of the **specific page** where you found the contact info (homepage, `/contact`, etc.) — not just the homepage
+- `notes` — short free text, e.g. the text of the WhatsApp CTA (`"Chat on WhatsApp"`), or a caveat like `"only phone listed, no WhatsApp widget"`
+- Leave optional cells blank rather than guessing. Never fabricate phone numbers, emails, or WhatsApp links.
 
-Per-run exports use the same schema, scoped to the rows touched in that run.
+**File roles**:
+- `contacts.csv` — the team's action list. Every row is WhatsApp-reachable.
+- `no-whatsapp.csv` — the "enriched but not WhatsApp-ready" reserve. Good data we've already paid tokens for; useful for later (different outreach channel, or re-check if we re-scrape and WhatsApp has since been added).
+- Per-run export (`{YYYY-MM-DD}-{slug}.csv`) — mirrors what was added to `contacts.csv` in this run only.
 
-If the user asks for a different format (markdown table, plain list, spreadsheet upload, etc.), follow their request — but still update `contacts.csv` as the source of truth.
+If the user asks for a different format (markdown table, plain list, spreadsheet upload, etc.), follow their request — but still update both CSVs as the source of truth, and the WhatsApp split still applies.
 
 ## Rules
 
-- **Never fabricate contact data.** Blank > guessed. If you can't verify a field, leave it empty and say so.
-- **A WhatsApp number is only `yes` if you actually saw a WhatsApp link/button on the site.** Don't infer it from a mobile-looking phone number.
-- **Visit the real site.** Don't copy contact details from directory aggregators if the business has its own website — aggregators go stale.
+- **`contacts.csv` is WhatsApp-only; `no-whatsapp.csv` is the reserve for enriched-but-not-WhatsApp leads.** Never drop a candidate you've already parsed — route it to the right file. Only candidates that fail even the website+phone/email check get discarded.
+- **`website` is mandatory on every row in both files.** `whatsapp_number` is mandatory in `contacts.csv` only. Don't pad either file with rows that have a blank website.
+- **When you find WhatsApp for a candidate that's already in `no-whatsapp.csv`, move it** — remove from `no-whatsapp.csv`, insert into `contacts.csv`, bump `last_checked`. Don't leave stale duplicates across files.
+- **Never fabricate contact data.** Blank > guessed. An inferred WhatsApp number (from a mobile-looking phone) is fabrication — it does not count.
+- **A WhatsApp number is only valid when the markdown actually contains a `wa.me/…`, `api.whatsapp.com/…`, or `/whatsapp/` link.** An "WhatsApp" label without an extractable number is unverified — drop the lead.
+- **Visit the real site.** Use `r.jina.ai/<homepage>` to fetch the business's own site. Don't copy contact details from directory aggregators if the business has its own domain — aggregators go stale and rarely expose WhatsApp links in their markdown anyway.
+- **Default to `curl` + Jina. Escalate to `agent-browser` per-site, not per-batch.** If you're reaching for `agent-browser` on the first candidate, stop and rethink — you're about to blow the turn budget.
+- **Under-deliver gracefully.** If the candidate pool is exhausted before reaching N, report `M found, N requested` and stop. Don't loop searching for more — ask the user to broaden the trade or location instead.
 - **Respect robots.txt and ToS.** Don't scrape sources that forbid it. Prefer official listings, directories, and the businesses' own sites.
 - **No cold-outreach drafting unless asked.** This group finds leads. Drafting messages is a separate ask.
 - **Privacy:** only collect business contact info, not personal data about employees unless it's publicly listed as a business contact.
-- **Cite sources** in the CSV (the specific page URL, not just the homepage) so the team can verify.
+- **Cite sources** in the CSV (the specific page URL where you found the WhatsApp link, not just the homepage) so the team can verify.
 
 ## When the ask is ambiguous
 
