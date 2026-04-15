@@ -1,0 +1,134 @@
+#!/bin/bash
+# push-code — propagate nanoclaw code changes from laptop to home Mac
+#
+# Usage:
+#   ./scripts/handoff/push-code           # rsync code only
+#   ./scripts/handoff/push-code --restart  # also restart nanoclaw on whichever side owns it
+#
+# What it does:
+#   1. Checks home Mac reachability
+#   2. Runs `npm run build` locally — aborts if it fails
+#   3. Detects if package.json, agent-runner package.json, or Dockerfile changed
+#   4. Rsyncs src/, dist/, container/, top-level configs to home Mac
+#   5. Conditionally runs npm ci on remote (root + agent-runner) if deps changed
+#   6. Conditionally rebuilds container image on remote if Dockerfile changed
+#
+# Does NOT sync runtime state (store/, groups/, data/) — that's the sleep/wake hooks' job.
+# Does NOT restart nanoclaw unless --restart is passed.
+
+set -eu
+export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+REMOTE="koko-mac-home"
+NANOCLAW_DIR="$HOME/Documents/ai/nanoclaw"
+LOG="$HOME/Library/Logs/nanoclaw-handoff.log"
+PLIST="$HOME/Library/LaunchAgents/com.nanoclaw.plist"
+
+RESTART=false
+for arg in "$@"; do
+  case "$arg" in
+    --restart) RESTART=true ;;
+    -h|--help)
+      sed -n '2,20p' "$0"; exit 0 ;;
+  esac
+done
+
+log() { echo "[$(date '+%F %T')] $*"; }
+exec > >(tee -a "$LOG") 2>&1
+
+cd "$NANOCLAW_DIR"
+
+echo
+log "===== PUSH-CODE START ====="
+
+# 1. Reachability
+log "checking $REMOTE reachability..."
+if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE" true 2>/dev/null; then
+  log "ERROR: $REMOTE not reachable. aborting."
+  exit 1
+fi
+
+# 2. Build locally first
+log "running local build (npm run build)..."
+if ! npm run build; then
+  log "ERROR: local build failed. fix it and re-run."
+  exit 1
+fi
+log "  ✓ build passed"
+
+# 3. Diff-detect: package.json, agent-runner package.json, Dockerfile
+LOCAL_PKG=$(shasum package.json package-lock.json 2>/dev/null | shasum | awk '{print $1}')
+REMOTE_PKG=$(ssh "$REMOTE" 'cd nanoclaw && shasum package.json package-lock.json 2>/dev/null | shasum | awk "{print \$1}"' 2>/dev/null || echo "")
+DEPS_CHANGED=false
+[ "$LOCAL_PKG" != "$REMOTE_PKG" ] && DEPS_CHANGED=true && log "  package.json or lockfile changed"
+
+LOCAL_AR_PKG=$(shasum container/agent-runner/package.json container/agent-runner/package-lock.json 2>/dev/null | shasum | awk '{print $1}')
+REMOTE_AR_PKG=$(ssh "$REMOTE" 'cd nanoclaw && shasum container/agent-runner/package.json container/agent-runner/package-lock.json 2>/dev/null | shasum | awk "{print \$1}"' 2>/dev/null || echo "")
+AR_DEPS_CHANGED=false
+[ "$LOCAL_AR_PKG" != "$REMOTE_AR_PKG" ] && AR_DEPS_CHANGED=true && log "  agent-runner package.json or lockfile changed"
+
+LOCAL_DOCKERFILE=$(shasum container/Dockerfile 2>/dev/null | awk '{print $1}')
+REMOTE_DOCKERFILE=$(ssh "$REMOTE" 'shasum nanoclaw/container/Dockerfile 2>/dev/null | awk "{print \$1}"' 2>/dev/null || echo "")
+DOCKERFILE_CHANGED=false
+[ "$LOCAL_DOCKERFILE" != "$REMOTE_DOCKERFILE" ] && DOCKERFILE_CHANGED=true && log "  Dockerfile changed"
+
+# 4. Rsync code
+log "rsync src/ ..."
+rsync -az --delete --exclude 'node_modules' src/ "$REMOTE:nanoclaw/src/"
+
+log "rsync dist/ ..."
+rsync -az --delete dist/ "$REMOTE:nanoclaw/dist/"
+
+log "rsync container/ ..."
+rsync -az --delete --exclude 'node_modules' --exclude 'dist' \
+  container/ "$REMOTE:nanoclaw/container/"
+
+log "rsync top-level configs..."
+rsync -az \
+  package.json package-lock.json tsconfig.json CLAUDE.md \
+  "$REMOTE:nanoclaw/"
+
+# 5. Conditional work on remote
+if [ "$DEPS_CHANGED" = true ]; then
+  log "running npm ci on remote (root)..."
+  ssh "$REMOTE" 'cd nanoclaw && npm ci 2>&1 | tail -5'
+fi
+
+if [ "$AR_DEPS_CHANGED" = true ]; then
+  log "running npm ci on remote (agent-runner)..."
+  ssh "$REMOTE" 'cd nanoclaw/container/agent-runner && npm ci 2>&1 | tail -5'
+fi
+
+if [ "$DOCKERFILE_CHANGED" = true ]; then
+  log "rebuilding container image on remote (this takes 5-15 min)..."
+  ssh "$REMOTE" 'cd nanoclaw && docker build -t nanoclaw-agent:latest container/ 2>&1 | tail -10'
+fi
+
+log "code is now in place on $REMOTE"
+
+# 6. Optional restart
+if [ "$RESTART" = true ]; then
+  log "--restart flag set: bouncing nanoclaw"
+  # Figure out who owns it right now (best-effort)
+  LAPTOP_LOADED=$(launchctl list 2>/dev/null | awk '/com\.nanoclaw/ {print $1}' | head -1)
+  REMOTE_LOADED=$(ssh "$REMOTE" 'launchctl list 2>/dev/null | awk "/com\.nanoclaw/ {print \$1}" | head -1' 2>/dev/null || echo "")
+
+  if [ -n "$LAPTOP_LOADED" ]; then
+    log "laptop owns it — restarting laptop nanoclaw"
+    launchctl unload "$PLIST"
+    launchctl load "$PLIST"
+  elif [ -n "$REMOTE_LOADED" ]; then
+    log "home Mac owns it — restarting remote nanoclaw"
+    ssh "$REMOTE" 'launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist && launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist'
+  else
+    log "neither side has it loaded — skipping restart"
+  fi
+fi
+
+log "===== PUSH-CODE COMPLETE ====="
+echo
+if [ "$RESTART" != true ]; then
+  echo "note: nanoclaw must restart to actually run the new code."
+  echo "it will restart automatically on the next sleep/wake cycle."
+  echo "to restart immediately, re-run with: $0 --restart"
+fi

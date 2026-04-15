@@ -1,0 +1,202 @@
+#!/bin/bash
+# push-projects — rsync mounted project working dirs from laptop to home Mac
+#
+# Usage:
+#   ./scripts/handoff/push-projects                    # ACTIVE-SESSION projects only (default)
+#   ./scripts/handoff/push-projects --all              # all mounted projects
+#   ./scripts/handoff/push-projects hive-fam           # only the one named (ignores scope)
+#   ./scripts/handoff/push-projects hive-fam linkbase  # multiple named (ignores scope)
+#   ./scripts/handoff/push-projects --list             # preview what would sync, don't
+#
+# Default scope: mirrors the sleep hook — syncs only projects belonging to
+# groups with running agent containers at the moment you run it. This makes
+# `ppush` feel like "simulate a lid close for the projects currently in use."
+# Use `--all` to push every mounted project regardless of activity, or name
+# specific projects as positional args.
+#
+# What it does:
+#   1. Reachability check on koko-mac-home
+#   2. Determines candidate paths:
+#        * positional args → substring filter over all mount hostPaths
+#        * --all → all mount hostPaths from store/messages.db
+#        * default (no args) → only mount hostPaths from groups that have
+#          running `nanoclaw-*` docker containers right now (active sessions)
+#   3. rsyncs each to the matching tilde-relative location on home Mac
+#   4. --delete so stale files on home Mac disappear
+#   5. Excludes .git, .env*, node_modules, build artifacts, media
+#
+# When to use:
+#   - Before a planned sleep, if you've made changes to a project mount that
+#     you want the home Mac to see while the laptop is offline.
+#   - To force-refresh one project without touching others.
+#
+# Does NOT touch nanoclaw state — that's the sleep/wake hooks' job.
+# Does NOT restart anything on either Mac.
+
+set -eu
+export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+REMOTE="koko-mac-home"
+NANOCLAW_DIR="$HOME/Documents/ai/nanoclaw"
+LOG="$HOME/Library/Logs/nanoclaw-handoff.log"
+
+LIST_ONLY=false
+FORCE_ALL=false
+FILTERS=()
+for arg in "$@"; do
+  case "$arg" in
+    --list|-l) LIST_ONLY=true ;;
+    --all|-a) FORCE_ALL=true ;;
+    -h|--help)
+      sed -n '2,20p' "$0"; exit 0 ;;
+    *) FILTERS+=("$arg") ;;
+  esac
+done
+# --all overrides any positional filters
+if [ "$FORCE_ALL" = true ]; then
+  FILTERS=()
+fi
+
+log() { echo "[$(date '+%F %T')] $*"; }
+exec > >(tee -a "$LOG") 2>&1
+
+cd "$NANOCLAW_DIR"
+
+echo
+log "===== PUSH-PROJECTS START ====="
+
+# 1. Reachability
+if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE" true 2>/dev/null; then
+  log "ERROR: $REMOTE not reachable. aborting."
+  exit 1
+fi
+
+# 2. Determine candidate paths based on mode:
+#      * positional args → named filter (substring match against all mounts)
+#      * --all → every mount from the DB
+#      * default → only mounts owned by groups with running agent containers
+PATHS=()
+
+if [ "${#FILTERS[@]}" -gt 0 ]; then
+  # Named projects — pull from all mounts and substring-filter
+  RAW_PATHS=$(/usr/bin/sqlite3 "$NANOCLAW_DIR/store/messages.db" \
+    "SELECT DISTINCT json_extract(mount.value, '\$.hostPath')
+     FROM registered_groups, json_each(container_config, '\$.additionalMounts') mount
+     WHERE container_config IS NOT NULL" 2>/dev/null)
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    expanded="${p/#\~/$HOME}"
+    for f in "${FILTERS[@]}"; do
+      if [[ "$expanded" == *"$f"* ]]; then
+        PATHS+=("$expanded")
+        break
+      fi
+    done
+  done <<< "$RAW_PATHS"
+
+elif [ "$FORCE_ALL" = true ]; then
+  # --all: every mount from the DB, deduped
+  log "mode: --all (every mounted project)"
+  RAW_PATHS=$(/usr/bin/sqlite3 "$NANOCLAW_DIR/store/messages.db" \
+    "SELECT DISTINCT json_extract(mount.value, '\$.hostPath')
+     FROM registered_groups, json_each(container_config, '\$.additionalMounts') mount
+     WHERE container_config IS NOT NULL" 2>/dev/null)
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    expanded="${p/#\~/$HOME}"
+    PATHS+=("$expanded")
+  done <<< "$RAW_PATHS"
+
+else
+  # Default: scope to groups with active agent containers
+  ACTIVE_FOLDERS=$(docker ps --filter 'name=nanoclaw-' --format '{{.Names}}' 2>/dev/null \
+    | sed -e 's/^nanoclaw-//' -e 's/-[0-9][0-9]*$//' \
+    | tr '-' '_')
+  if [ -z "$ACTIVE_FOLDERS" ]; then
+    log "no active agent containers — nothing to push."
+    log "use 'ppush --all' to push every project, or 'ppush <name>' to push by name."
+    exit 0
+  fi
+  log "mode: active sessions ($(echo $ACTIVE_FOLDERS | tr '\n' ' '))"
+  SEEN=""
+  for folder in $ACTIVE_FOLDERS; do
+    HOST_PATHS=$(/usr/bin/sqlite3 "$NANOCLAW_DIR/store/messages.db" \
+      "SELECT json_extract(mount.value, '\$.hostPath')
+       FROM registered_groups, json_each(container_config, '\$.additionalMounts') mount
+       WHERE folder = '$folder' AND container_config IS NOT NULL" 2>/dev/null)
+    for hp in $HOST_PATHS; do
+      [ -n "$hp" ] || continue
+      expanded="${hp/#\~/$HOME}"
+      case " $SEEN " in *" $expanded "*) continue ;; esac
+      SEEN="$SEEN $expanded"
+      PATHS+=("$expanded")
+    done
+  done
+fi
+
+if [ "${#PATHS[@]}" -eq 0 ]; then
+  log "no matching paths found"
+  exit 0
+fi
+
+log "will sync ${#PATHS[@]} path(s):"
+for p in "${PATHS[@]}"; do
+  log "  - $p"
+done
+
+if [ "$LIST_ONLY" = true ]; then
+  log "list-only mode — not syncing"
+  exit 0
+fi
+
+# 4. Rsync each path
+PROJECT_EXCLUDES=(
+  --exclude '.git'          # never rsync git metadata — corrupts repos
+  --exclude '.env'          # per-machine secrets — never sync, never delete
+  --exclude '.env.*'        # also .env.local, .env.production, etc.
+  --exclude 'node_modules'
+  --exclude '.next'
+  --exclude 'dist'
+  --exclude 'build'
+  --exclude '.turbo'
+  --exclude '.expo'
+  --exclude 'coverage'
+  --exclude 'ios/Pods'
+  --exclude 'android/build'
+  --exclude '*.mp4'
+  --exclude '*.mov'
+  --exclude '*.avi'
+  --exclude '*.mkv'
+  --exclude '.pnpm-store'
+  --exclude '.DS_Store'
+)
+
+start_ts=$(date +%s)
+ok=0
+fail=0
+
+for path in "${PATHS[@]}"; do
+  [ -d "$path" ] || { log "  SKIP: $path (not a directory on laptop)"; continue; }
+
+  # Derive relative path — strip $HOME prefix so it maps to ~/... on remote
+  if [[ "$path" == "$HOME"/* ]]; then
+    rel="${path#$HOME/}"
+  else
+    log "  SKIP: $path (not under \$HOME, can't map to remote)"
+    continue
+  fi
+
+  log "rsync → $rel"
+  if rsync -az --update --delete "${PROJECT_EXCLUDES[@]}" \
+       "$path/" "$REMOTE:$rel/" 2>&1 | tail -2; then
+    log "  ✓ $rel ok"
+    ok=$((ok+1))
+  else
+    log "  ✗ $rel failed"
+    fail=$((fail+1))
+  fi
+done
+
+duration=$(( $(date +%s) - start_ts ))
+log "===== PUSH-PROJECTS COMPLETE ====="
+log "synced: $ok  failed: $fail  duration: ${duration}s"

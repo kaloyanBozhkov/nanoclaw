@@ -1,0 +1,161 @@
+#!/bin/bash
+# pull-projects — rsync mounted project working dirs FROM home Mac TO laptop
+#
+# Usage:
+#   ./scripts/handoff/pull-projects                    # pull all mounted projects (default)
+#   ./scripts/handoff/pull-projects --all              # explicit "pull everything" (same as no args)
+#   ./scripts/handoff/pull-projects hive-fam           # only the one named
+#   ./scripts/handoff/pull-projects hive-fam linkbase  # multiple
+#   ./scripts/handoff/pull-projects --list             # show what would sync, don't
+#
+# Mirror of push-projects but in the opposite direction (home Mac → laptop).
+#
+# When to use:
+#   - After a sleep/wake cycle, if you want to see what home Mac's agents did
+#     to mounted project dirs while the laptop was asleep.
+#   - After running agents on home Mac that edited project files, to bring
+#     those edits back to the laptop.
+#
+# The wake hook intentionally does NOT do this automatically — to keep wake
+# time low (~20s) and avoid racing with laptop-side file edits immediately
+# after lid-open. Call this script when you want the pull.
+#
+# Uses rsync --update so any file you've edited on the laptop that is newer
+# than the home Mac's version will NOT be overwritten.
+#
+# Does NOT touch nanoclaw state — that's the wake hook's job.
+
+set -eu
+export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+REMOTE="koko-mac-home"
+NANOCLAW_DIR="$HOME/Documents/ai/nanoclaw"
+LOG="$HOME/Library/Logs/nanoclaw-handoff.log"
+
+LIST_ONLY=false
+FORCE_ALL=false
+FILTERS=()
+for arg in "$@"; do
+  case "$arg" in
+    --list|-l) LIST_ONLY=true ;;
+    --all|-a) FORCE_ALL=true ;;
+    -h|--help)
+      sed -n '2,20p' "$0"; exit 0 ;;
+    *) FILTERS+=("$arg") ;;
+  esac
+done
+# --all overrides any positional filters
+if [ "$FORCE_ALL" = true ]; then
+  FILTERS=()
+fi
+
+log() { echo "[$(date '+%F %T')] $*"; }
+exec > >(tee -a "$LOG") 2>&1
+
+cd "$NANOCLAW_DIR"
+
+echo
+log "===== PULL-PROJECTS START ====="
+
+# 1. Reachability
+if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE" true 2>/dev/null; then
+  log "ERROR: $REMOTE not reachable. aborting."
+  exit 1
+fi
+
+# 2. Enumerate mount hostPaths from store/messages.db
+RAW_PATHS=$(/usr/bin/sqlite3 "$NANOCLAW_DIR/store/messages.db" \
+  "SELECT DISTINCT json_extract(mount.value, '\$.hostPath')
+   FROM registered_groups, json_each(container_config, '\$.additionalMounts') mount
+   WHERE container_config IS NOT NULL" 2>/dev/null)
+
+if [ -z "$RAW_PATHS" ]; then
+  log "no mounted paths found in store/messages.db — nothing to sync"
+  exit 0
+fi
+
+PATHS=()
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  expanded="${p/#\~/$HOME}"
+  PATHS+=("$expanded")
+done <<< "$RAW_PATHS"
+
+# 3. Apply filter if args passed
+if [ "${#FILTERS[@]}" -gt 0 ]; then
+  FILTERED=()
+  for path in "${PATHS[@]}"; do
+    for f in "${FILTERS[@]}"; do
+      if [[ "$path" == *"$f"* ]]; then
+        FILTERED+=("$path")
+        break
+      fi
+    done
+  done
+  PATHS=("${FILTERED[@]}")
+fi
+
+if [ "${#PATHS[@]}" -eq 0 ]; then
+  log "no paths match filter: ${FILTERS[*]}"
+  exit 0
+fi
+
+log "will pull ${#PATHS[@]} path(s):"
+for p in "${PATHS[@]}"; do
+  log "  - $p"
+done
+
+if [ "$LIST_ONLY" = true ]; then
+  log "list-only mode — not syncing"
+  exit 0
+fi
+
+# 4. Rsync each path FROM home Mac
+PROJECT_EXCLUDES=(
+  --exclude '.git'          # never rsync git metadata — corrupts repos
+  --exclude '.env'          # per-machine secrets — never sync, never delete
+  --exclude '.env.*'        # also .env.local, .env.production, etc.
+  --exclude 'node_modules'
+  --exclude '.next'
+  --exclude 'dist'
+  --exclude 'build'
+  --exclude '.turbo'
+  --exclude '.expo'
+  --exclude 'coverage'
+  --exclude 'ios/Pods'
+  --exclude 'android/build'
+  --exclude '*.mp4'
+  --exclude '*.mov'
+  --exclude '*.avi'
+  --exclude '*.mkv'
+  --exclude '.pnpm-store'
+  --exclude '.DS_Store'
+)
+
+start_ts=$(date +%s)
+ok=0
+fail=0
+
+for path in "${PATHS[@]}"; do
+  # Derive relative path from $HOME
+  if [[ "$path" == "$HOME"/* ]]; then
+    rel="${path#$HOME/}"
+  else
+    log "  SKIP: $path (not under \$HOME, can't map from remote)"
+    continue
+  fi
+
+  log "rsync ← $rel"
+  if rsync -az --update --delete "${PROJECT_EXCLUDES[@]}" \
+       "$REMOTE:$rel/" "$path/" 2>&1 | tail -2; then
+    log "  ✓ $rel ok"
+    ok=$((ok+1))
+  else
+    log "  ✗ $rel failed"
+    fail=$((fail+1))
+  fi
+done
+
+duration=$(( $(date +%s) - start_ts ))
+log "===== PULL-PROJECTS COMPLETE ====="
+log "pulled: $ok  failed: $fail  duration: ${duration}s"
