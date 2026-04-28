@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
@@ -10,6 +11,40 @@ import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { handleOpenHost } from './open-host.js';
 import { RegisteredGroup } from './types.js';
+
+/**
+ * Translate a /workspace/extra/<mount>/<rest> container path to its host-side
+ * path by reverse-lookup through the source group's additionalMounts config.
+ * Returns null if the path doesn't match a registered mount.
+ */
+function resolveExtraMountPath(
+  containerPath: string,
+  sourceGroup: string,
+  registeredGroups: Record<string, RegisteredGroup>,
+): string | null {
+  const prefix = '/workspace/extra/';
+  if (!containerPath.startsWith(prefix)) return null;
+
+  const remainder = containerPath.slice(prefix.length);
+  const firstSlash = remainder.indexOf('/');
+  const mountName = firstSlash === -1 ? remainder : remainder.slice(0, firstSlash);
+  const rest = firstSlash === -1 ? '' : remainder.slice(firstSlash + 1);
+
+  const group = Object.values(registeredGroups).find(
+    (g) => g.folder === sourceGroup,
+  );
+  const mounts = group?.containerConfig?.additionalMounts ?? [];
+
+  for (const m of mounts) {
+    const cp = m.containerPath || path.basename(m.hostPath);
+    if (cp !== mountName) continue;
+    const expanded = m.hostPath.startsWith('~/')
+      ? path.join(os.homedir(), m.hostPath.slice(2))
+      : m.hostPath;
+    return rest ? path.join(expanded, rest) : expanded;
+  }
+  return null;
+}
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -95,19 +130,28 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   await deps.sendMessage(chatJid, data.text);
                   logger.info({ chatJid, sourceGroup }, 'IPC message sent');
                 } else if (data.type === 'image' && data.filePath) {
-                  // Resolve container path to host path
-                  // Agent writes to /workspace/group/ which maps to groups/{folder}/
-                  let hostPath = data.filePath as string;
-                  if (hostPath.startsWith('/workspace/group/')) {
+                  // Translate container path to host path. Two cases:
+                  // 1. /workspace/group/ → groups/{sourceGroup}/ (always bind-mounted)
+                  // 2. /workspace/extra/<mount>/ → reverse-lookup via additionalMounts
+                  const containerPath = data.filePath as string;
+                  let hostPath = containerPath;
+                  if (containerPath.startsWith('/workspace/group/')) {
                     hostPath = path.join(
                       GROUPS_DIR,
                       sourceGroup,
-                      hostPath.slice('/workspace/group/'.length),
+                      containerPath.slice('/workspace/group/'.length),
                     );
+                  } else if (containerPath.startsWith('/workspace/extra/')) {
+                    const resolved = resolveExtraMountPath(
+                      containerPath,
+                      sourceGroup,
+                      registeredGroups,
+                    );
+                    if (resolved) hostPath = resolved;
                   }
                   if (!fs.existsSync(hostPath)) {
                     logger.warn(
-                      { chatJid, hostPath, sourceGroup },
+                      { chatJid, containerPath, hostPath, sourceGroup },
                       'IPC image file not found',
                     );
                   } else {

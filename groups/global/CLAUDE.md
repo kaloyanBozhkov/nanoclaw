@@ -19,6 +19,15 @@ Your output is sent to the user or group.
 
 You also have `mcp__nanoclaw__send_message` 1which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work.
 
+### Always ack first
+
+Before starting any task that will take more than a few seconds, send ONE short line via `send_message` saying what you're about to do. Do NOT wait for user approval — send the ack and immediately keep working. Examples:
+- *On it — scaffolding padelvarna repo, deploying to Vercel, then I'll report back.*
+- *Reading design.pen and pulling the auth screens — back in a moment.*
+- *Kicking off the dev pipeline: Triage → Engineer → Reviews → PR.*
+
+Keep it to one sentence. The user wants visibility, not a confirmation gate.
+
 ### Internal thoughts
 
 If part of your output is internal reasoning rather than something for the user, wrap it in `<internal>` tags:
@@ -38,6 +47,10 @@ When working as a sub-agent or teammate, only use `send_message` if instructed t
 ## Your Workspace
 
 Files you create are saved in `/workspace/group/`. Use this for notes, research, or anything that should persist.
+
+### Sending images to the chat
+
+`mcp__nanoclaw__send_image` only works for files under paths the host can read — `/workspace/group/` or a `/workspace/extra/<mount>/` bind mount. Files under `/tmp`, `/home/node`, or `/app` are container-only and will be rejected. If a screenshot is saved outside those paths, copy it first (`cp /tmp/foo.png /workspace/group/foo.png`) and then call `send_image` with the new path.
 
 ## Memory
 
@@ -184,6 +197,18 @@ Tools:
 Important:
 - Design file should have clear & descriptive window/frame names so team handoffs are easier.
 - When implementing a design come up with three variations of it that populat startups would use and rank these by % of quality UI/UX. Pick the top ranked one and implement that design.
+
+Read-back protocol (.pen files):
+After opening a `.pen` file with `mcp__pencil__open_document` and inspecting it with `mcp__pencil__batch_get`, you MUST send a short read-back to the chat via `send_message` BEFORE doing any design work. The read-back confirms you actually loaded the right file. Include:
+1. The file path you opened (e.g. `/workspace/group/clean-varna/design.pen`)
+2. Number of top-level frames/screens found
+3. The names of each frame/screen (or first 10 if many)
+4. One-line summary of what the design appears to cover
+
+Example:
+> *Loaded `/workspace/group/clean-varna/design.pen` — 6 frames: Home, Booking, Driver Profile, Trip Summary, Settings, Login. Looks like the rider-side flow. Proceeding to extract the booking screen specs.*
+
+If the file is empty, missing expected screens, or the open call returned an error, STOP and report it to the user instead of guessing. Do not begin design work on a file you couldn't verify.
 
 Handoff: 
 - Pass UI/UX design specs and interaction logic to Full-Stack Engineer for implementation.
@@ -529,6 +554,29 @@ Communication must be precise and technical:
 - Objective: Explicit request / expectation
 - Artifacts: Logs, diffs, errors, outputs
 - Pass documents in full. Never summarize or truncate handoff artifacts.
+
+## Injected Environment Variables
+
+The host pre-injects these as shell env vars in every container — use them directly, never look them up in a project's `.env`:
+
+| Var | Purpose |
+|-----|---------|
+| `GH_TOKEN` / `GITHUB_TOKEN` | `gh` CLI and `git` auth (clone, push, PRs, issues) |
+| `VERCEL_TOKEN` | `vercel` CLI auth |
+| `NPM_TOKEN` | npm registry auth (install private packages, publish) |
+
+### Publishing to npm
+
+`NPM_TOKEN` is already in the shell. To publish:
+
+```bash
+echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > ~/.npmrc
+npm version patch                  # or minor / major — npm rejects re-publishing the same version
+npm publish                        # respects "private": true
+npm publish --access public        # for new scoped public packages
+```
+
+Never commit `.npmrc` — it lives in the container's per-group `$HOME` and is not git-tracked, so you can leave it there safely.
 
 ## Safety & Security
 

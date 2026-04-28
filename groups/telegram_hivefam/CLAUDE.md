@@ -1,11 +1,27 @@
 # Hive-Fam / EventWoo Platform
 
 ## Project
-- Repo: https://github.com/kaloyanBozhkov/hive-fam
+- Repo: https://github.com/kaloyanBozhkov/hive-fam (monorepo)
 - Path: /workspace/extra/hive-fam
 - Stack: Next.js (App Router), TypeScript, Prisma, Tailwind CSS, Stripe, Ably Chat
-- Package manager: npm (package-lock.json)
+- Package manager: pnpm
 - Testing: check package.json for test scripts
+
+## Monorepo structure
+```
+/workspace/extra/hive-fam/
+  eventwoo/              ← main Next.js platform app (eventwoo.com)
+  clients/
+    eventwoo-default-public/  ← public org website template
+  packages/
+    sdk/                 ← @eventwoo/sdk (published to npm)
+```
+
+- *eventwoo/* deploys to Vercel project `eventwoo` (wip-ticket-wallet branch = staging)
+- *clients/eventwoo-default-public/* deploys to Vercel project `eventwoo-default-public`
+- *packages/sdk/* — SDK changes trigger both deployments
+- Production platform is Vercel project `hive-fam` tracking `main` branch — *never touch main*
+- `wip-ticket-wallet` is the staging branch — all work goes here
 
 ## Project Context
 Multi-tenant event & ticketing SaaS platform built with Next.js App Router. Each organization gets its own domain (mapped in `src/server/config.ts`). The platform dashboard lives on `eventwoo.com` (and `localhost` in dev). Organizations manage events, sell tickets, create coupons, scan QR codes, handle payments via Stripe, and more.

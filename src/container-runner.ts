@@ -255,7 +255,13 @@ function buildContainerArgs(
   // Pass GitHub token for git/gh CLI access inside containers
   // Prefer live token from `gh auth token` so scope refreshes propagate automatically,
   // fall back to static .env value if gh CLI is unavailable.
-  const envSecrets = readEnvFile(['GH_TOKEN', 'GITHUB_TOKEN', 'VERCEL_TOKEN']);
+  const envSecrets = readEnvFile([
+    'GH_TOKEN',
+    'GITHUB_TOKEN',
+    'VERCEL_TOKEN',
+    'NPM_TOKEN',
+    'GITLAB_TOKEN',
+  ]);
   let ghToken = '';
   try {
     ghToken = execSync('gh auth token', {
@@ -274,6 +280,18 @@ function buildContainerArgs(
   const vercelToken = envSecrets.VERCEL_TOKEN || '';
   if (vercelToken) {
     args.push('-e', `VERCEL_TOKEN=${vercelToken}`);
+  }
+
+  // Pass npm token for authenticated npm publish/install inside containers
+  const npmToken = envSecrets.NPM_TOKEN || '';
+  if (npmToken) {
+    args.push('-e', `NPM_TOKEN=${npmToken}`);
+  }
+
+  // Pass GitLab token for glab CLI access inside containers
+  const gitlabToken = envSecrets.GITLAB_TOKEN || '';
+  if (gitlabToken) {
+    args.push('-e', `GITLAB_TOKEN=${gitlabToken}`);
   }
 
   // Pass Pencil MCP URL so container agents can connect to host Pencil MCP server
@@ -429,8 +447,10 @@ export async function runContainerAgent(
               newSessionId = parsed.newSessionId;
             }
             hadStreamingOutput = true;
-            // Activity detected — reset the hard timeout
-            resetTimeout();
+            // CONTAINER_TIMEOUT is now a HARD CAP — we no longer reset it
+            // on activity, so runaway tool-call loops can't keep the
+            // container alive beyond its configured max runtime. IDLE_TIMEOUT
+            // in index.ts still resets on activity for graceful stdin-close.
             // Call onOutput for all markers (including null results)
             // so idle timers start even for "silent" query completions.
             outputChain = outputChain.then(() => onOutput(parsed));
@@ -450,8 +470,8 @@ export async function runContainerAgent(
       for (const line of lines) {
         if (line) logger.debug({ container: group.folder }, line);
       }
-      // Don't reset timeout on stderr — SDK writes debug logs continuously.
-      // Timeout only resets on actual output (OUTPUT_MARKER in stdout).
+      // (CONTAINER_TIMEOUT is now a hard cap; no timer reset happens
+      // anywhere, neither here nor on stdout activity.)
       if (stderrTruncated) return;
       const remaining = CONTAINER_MAX_OUTPUT_SIZE - stderr.length;
       if (chunk.length > remaining) {
@@ -490,13 +510,10 @@ export async function runContainerAgent(
       });
     };
 
-    let timeout = setTimeout(killOnTimeout, timeoutMs);
-
-    // Reset the timeout whenever there's activity (streaming output)
-    const resetTimeout = () => {
-      clearTimeout(timeout);
-      timeout = setTimeout(killOnTimeout, timeoutMs);
-    };
+    // Hard cap — never reset, never extended. If configTimeout is 30 min,
+    // the container is killed at 30 min from start regardless of activity.
+    // See comment in stdout handler above.
+    const timeout = setTimeout(killOnTimeout, timeoutMs);
 
     container.on('close', (code) => {
       clearTimeout(timeout);

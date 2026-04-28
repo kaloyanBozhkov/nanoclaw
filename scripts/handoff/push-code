@@ -19,6 +19,19 @@
 set -eu
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# Add nvm's current/default node to PATH if npm isn't already findable.
+# Looks in both homebrew-managed nvm and standalone ~/.nvm installs.
+if ! command -v npm >/dev/null 2>&1; then
+  for nvm_base in /opt/homebrew/opt/nvm/versions/node "$HOME/.nvm/versions/node"; do
+    [ -d "$nvm_base" ] || continue
+    latest=$(ls -1v "$nvm_base" 2>/dev/null | tail -1)
+    if [ -n "$latest" ] && [ -x "$nvm_base/$latest/bin/npm" ]; then
+      export PATH="$nvm_base/$latest/bin:$PATH"
+      break
+    fi
+  done
+fi
+
 REMOTE="koko-mac-home"
 NANOCLAW_DIR="$HOME/Documents/ai/nanoclaw"
 LOG="$HOME/Library/Logs/nanoclaw-handoff.log"

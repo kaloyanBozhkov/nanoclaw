@@ -64,20 +64,42 @@ server.tool(
 
 server.tool(
   'send_image',
-  "Send an image/photo to the user or group. The file must exist on disk (e.g. a screenshot you saved, a generated chart, or a downloaded image). Supports PNG, JPG, WEBP, and GIF.",
+  `Send an image/photo to the user or group. Supports PNG, JPG, WEBP, and GIF.
+
+The file MUST be under a host-visible path, because the host reads the same file from its end of the bind mount to upload it:
+• /workspace/group/<name>           — per-group folder, persisted across runs
+• /workspace/extra/<mount>/<name>   — any bind-mounted project folder from containerConfig
+
+Paths under /tmp, /home/node, /app, or anywhere else inside the container are NOT visible to the host and will be rejected.
+
+If a screenshot lives outside the allowed paths (e.g. /tmp/screenshot.png), copy it first:
+\`cp /tmp/screenshot.png /workspace/group/screenshot.png\` and then call send_image with the new path.`,
   {
-    file_path: z.string().describe('Absolute path to the image file (e.g. /workspace/group/screenshot.png)'),
+    file_path: z.string().describe('Absolute path to the image file, under /workspace/group/ or /workspace/extra/<mount>/ (e.g. /workspace/group/screenshot.png).'),
     caption: z.string().optional().describe('Optional caption/description to send with the image (supports Markdown)'),
   },
   async (args) => {
-    if (!fs.existsSync(args.file_path)) {
-      return { content: [{ type: 'text' as const, text: `Error: file not found at ${args.file_path}` }] };
+    const p = args.file_path;
+    const hostVisible =
+      p.startsWith('/workspace/group/') || p.startsWith('/workspace/extra/');
+    if (!hostVisible) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Error: ${p} is only visible inside the container — the host can't read it, so the image would never reach the user. Copy it to /workspace/group/ (or an existing /workspace/extra/<mount>/ path) and call send_image with the new path.`,
+          },
+        ],
+      };
+    }
+    if (!fs.existsSync(p)) {
+      return { content: [{ type: 'text' as const, text: `Error: file not found at ${p}` }] };
     }
 
     const data: Record<string, string | undefined> = {
       type: 'image',
       chatJid,
-      filePath: args.file_path,
+      filePath: p,
       caption: args.caption || undefined,
       groupFolder,
       timestamp: new Date().toISOString(),

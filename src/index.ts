@@ -382,6 +382,179 @@ function formatStopSummary(
   return parts.join('\n');
 }
 
+interface SubagentActivity {
+  agentId: string;
+  teammateId: string | null;
+  summary: string | null;
+  lastText: string | null;
+  lastTool: { name: string; input: unknown } | null;
+}
+
+/**
+ * Walk subagent JSONLs for a session and return their last activity.
+ * Subagents persist under <sessionId>/subagents/agent-*.jsonl.
+ */
+function extractSubagentActivity(
+  groupFolder: string,
+  sessionId: string,
+): SubagentActivity[] {
+  const projectsDir = path.join(
+    DATA_DIR,
+    'sessions',
+    groupFolder,
+    '.claude',
+    'projects',
+  );
+  if (!fs.existsSync(projectsDir)) return [];
+
+  let subagentsDir: string | null = null;
+  for (const project of fs.readdirSync(projectsDir)) {
+    const candidate = path.join(projectsDir, project, sessionId, 'subagents');
+    if (fs.existsSync(candidate)) {
+      subagentsDir = candidate;
+      break;
+    }
+  }
+  if (!subagentsDir) return [];
+
+  const out: SubagentActivity[] = [];
+  for (const file of fs.readdirSync(subagentsDir)) {
+    if (!file.endsWith('.jsonl')) continue;
+    const fullPath = path.join(subagentsDir, file);
+    const stat = fs.statSync(fullPath);
+    if (!stat.isFile()) continue;
+    const lines = fs
+      .readFileSync(fullPath, 'utf-8')
+      .split('\n')
+      .filter((l) => l.trim());
+    if (lines.length === 0) continue;
+
+    let teammateId: string | null = null;
+    let summary: string | null = null;
+    try {
+      const first = JSON.parse(lines[0]);
+      const content =
+        typeof first?.message?.content === 'string'
+          ? first.message.content
+          : '';
+      const m = content.match(
+        /<teammate-message[^>]*teammate_id="([^"]+)"[^>]*summary="([^"]+)"/,
+      );
+      if (m) {
+        teammateId = m[1];
+        summary = m[2];
+      }
+    } catch {
+      /* skip */
+    }
+
+    let lastText: string | null = null;
+    let lastTool: { name: string; input: unknown } | null = null;
+    for (const line of lines.slice(-50)) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type !== 'assistant' || !entry.message?.content) continue;
+        const blocks = Array.isArray(entry.message.content)
+          ? entry.message.content
+          : [];
+        for (const block of blocks) {
+          if (block.type === 'text' && block.text) lastText = block.text;
+          else if (block.type === 'tool_use')
+            lastTool = { name: block.name, input: block.input };
+        }
+      } catch {
+        /* skip */
+      }
+    }
+
+    out.push({
+      agentId: file.replace(/\.jsonl$/, ''),
+      teammateId,
+      summary,
+      lastText,
+      lastTool,
+    });
+  }
+  return out;
+}
+
+/**
+ * Parse the millisecond timestamp suffix from container names like
+ * "nanoclaw-telegram-main-1777208528560". Returns null on parse failure.
+ */
+function parseContainerStartedAt(containerName: string): Date | null {
+  const m = containerName.match(/-(\d{13})$/);
+  if (!m) return null;
+  const ms = parseInt(m[1], 10);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms);
+}
+
+function formatUptime(startedAt: Date): string {
+  const elapsedSec = Math.max(
+    0,
+    Math.floor((Date.now() - startedAt.getTime()) / 1000),
+  );
+  if (elapsedSec < 60) return `${elapsedSec}s`;
+  const min = Math.floor(elapsedSec / 60);
+  if (min < 60) return `${min}m`;
+  return `${Math.floor(min / 60)}h ${min % 60}m`;
+}
+
+function formatToolLine(tool: { name: string; input: unknown }): string {
+  const inputStr = JSON.stringify(tool.input).slice(0, 140);
+  return `\`${tool.name}\` ${inputStr}`;
+}
+
+function formatInfoSummary(
+  containerName: string,
+  mainActivity: ReturnType<typeof extractLastActivity>,
+  subagents: SubagentActivity[],
+): string {
+  const parts: string[] = ['ℹ️ *Status*'];
+  const startedAt = parseContainerStartedAt(containerName);
+  if (startedAt) {
+    parts.push(`Container running for ${formatUptime(startedAt)}.`);
+  }
+
+  parts.push('\n*Main agent:*');
+  if (mainActivity?.lastTool) {
+    parts.push(formatToolLine(mainActivity.lastTool));
+  }
+  if (mainActivity?.lastText) {
+    const snippet = mainActivity.lastText.slice(0, 220);
+    parts.push(
+      `"${snippet}${mainActivity.lastText.length > 220 ? '…' : ''}"`,
+    );
+  }
+  if (!mainActivity?.lastTool && !mainActivity?.lastText) {
+    parts.push('_(no activity in transcript yet)_');
+  }
+
+  if (subagents.length === 0) {
+    parts.push('\n_No subagents running._');
+  } else {
+    parts.push(`\n*Subagents (${subagents.length}):*`);
+    for (const sa of subagents) {
+      const label = sa.teammateId ?? sa.agentId;
+      const summary = sa.summary ? ` — ${sa.summary}` : '';
+      parts.push(`\n• *${label}*${summary}`);
+      if (sa.lastTool) parts.push(`  ↳ ${formatToolLine(sa.lastTool)}`);
+      if (sa.lastText) {
+        const snippet = sa.lastText.slice(0, 180);
+        parts.push(
+          `  ↳ "${snippet}${sa.lastText.length > 180 ? '…' : ''}"`,
+        );
+      }
+      if (!sa.lastTool && !sa.lastText) {
+        parts.push('  ↳ _(no activity yet)_');
+      }
+    }
+  }
+
+  return parts.join('\n');
+}
+
 async function runAgent(
   group: RegisteredGroup,
   prompt: string,
@@ -685,6 +858,35 @@ async function main(): Promise<void> {
     await channel.sendMessage(chatJid, formatStopSummary(activity));
   }
 
+  // /info — non-destructive status report. Shows what the main agent and any
+  // running subagents are currently doing so the user can tell if a long run
+  // is making progress or stuck.
+  async function handleInfo(chatJid: string): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    const info = queue.getActiveContainer(chatJid);
+    if (!info) {
+      await channel.sendMessage(chatJid, 'ℹ️ Bot is idle. Nothing running.');
+      return;
+    }
+
+    const sessionId = sessions[group.folder];
+    const mainActivity = sessionId
+      ? extractLastActivity(group.folder, sessionId)
+      : null;
+    const subagents = sessionId
+      ? extractSubagentActivity(group.folder, sessionId)
+      : [];
+
+    await channel.sendMessage(
+      chatJid,
+      formatInfoSummary(info.containerName, mainActivity, subagents),
+    );
+  }
+
   // Handle /remote-control and /remote-control-end commands
   async function handleRemoteControl(
     command: string,
@@ -744,6 +946,15 @@ async function main(): Promise<void> {
       if (trimmed === '/stop') {
         handleStop(chatJid).catch((err) =>
           logger.error({ err, chatJid }, 'Stop command error'),
+        );
+        return;
+      }
+
+      // /info — non-destructive status report on the active container,
+      // intercepted before storage so it never reaches the agent.
+      if (trimmed === '/info') {
+        handleInfo(chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Info command error'),
         );
         return;
       }
