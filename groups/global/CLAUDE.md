@@ -28,6 +28,18 @@ Before starting any task that will take more than a few seconds, send ONE short 
 
 Keep it to one sentence. The user wants visibility, not a confirmation gate.
 
+### Procedure confirmation (after setup, before real work)
+
+When you've completed any non-trivial setup/verification step that gates the actual work — e.g. a tool came online, a file loaded, a connection succeeded, or you fell back to a workaround — send ONE short `send_message` confirming **how** you're going to do the work and **what** you understood the task to be. Then keep going. The user reads this to know: (a) you understood the task correctly, (b) which method/path you're using (proper tool vs fallback vs manual), so they can intervene if you've picked the wrong one.
+
+Trigger this whenever there's ambiguity in approach or you've worked around a problem. Examples:
+
+- *MCP loaded `design-workbench.pen` (35 frames). Comparing each screen to the live pages via `get_screenshot`, then patching CSS tokens to match. Will report deltas at the end.*
+- *Pencil MCP unreachable — falling back to parsing `.pen` as JSON via Python to extract design tokens and frame layouts. Less rich than MCP (no screenshots, no semantic queries) but unblocks the audit. OK to keep going?* — only ask if the fallback meaningfully changes deliverables.
+- *Auth confirmed via session cookie. Running E2E across login → projects → activities, capturing screenshots per page. Will flag any 404s or layout regressions.*
+
+One sentence each for **method** and **task** is enough — don't pad it. If the method is the obvious one and the task was already stated clearly in the user's last message, skip this; reserve it for moments where the *user couldn't tell from the outside which path you're on*.
+
 ### Internal thoughts
 
 If part of your output is internal reasoning rather than something for the user, wrap it in `<internal>` tags:
@@ -51,6 +63,10 @@ Files you create are saved in `/workspace/group/`. Use this for notes, research,
 ### Sending images to the chat
 
 `mcp__nanoclaw__send_image` only works for files under paths the host can read — `/workspace/group/` or a `/workspace/extra/<mount>/` bind mount. Files under `/tmp`, `/home/node`, or `/app` are container-only and will be rejected. If a screenshot is saved outside those paths, copy it first (`cp /tmp/foo.png /workspace/group/foo.png`) and then call `send_image` with the new path.
+
+## Pinned context (`## 📌 Pinned context` section)
+
+If your group's CLAUDE.md contains a `## 📌 Pinned context` section, treat every numbered item there as a **standing user instruction** that overrides conversation context and survives compaction. The user manages this list with `/pin <text>`, `📌 <text>`, `/pins`, and `/unpin <n>` — all intercepted host-side, never reaching you. You don't need to acknowledge pins or modify the section yourself. Just honor it.
 
 ## Memory
 
@@ -185,6 +201,7 @@ Stop & Ask Triggers — ping back if:
 3. Requirements force poor UX (unclear flows, excessive friction)
 3. A new pattern is required that isn’t defined in the system
 
+
 Tools:
 - Pencil MCP (`mcp__pencil__*`) — read, create, and edit .pen design files
   - `open_document(path)` to open a .pen file from the project
@@ -192,7 +209,10 @@ Tools:
   - `get_screenshot` to validate designs visually
   - `batch_design(operations)` to create/modify designs
   - `export_nodes` to export designs as PNG/JPEG for handoff
-  - If Pencil MCP tools fail or are unreachable, call `mcp__nanoclaw__open_on_host` with `app: "Pencil"` to launch the Pencil desktop app on the host machine, wait ~2 seconds, then retry.
+  - The Pencil MCP runs in `--app desktop` mode: it mirrors whatever the user's Pencil GUI currently has open. `mcp__pencil__open_document` is a no-op that does NOT load files from disk — it returns success even for invalid paths. `mcp__pencil__get_editor_state` returns whatever document is active in the GUI, which may be a different .pen than you intended.
+  - To actually load the right .pen, call `mcp__nanoclaw__open_on_host` with `app: "Pencil"` AND `filePath: "<path-to-the-.pen>"`. The host will run `open -a Pencil <file>`, which makes Pencil load that specific file. Wait ~2s, then call `mcp__pencil__get_editor_state` and verify the active editor path matches what you asked for. `filePath` accepts container paths (`/workspace/extra/<repo>/design.pen`, `/workspace/group/design.pen`) or host paths (`~/Documents/...`).
+  - **Use the host path returned by `get_editor_state` for ALL subsequent Pencil tool calls** that take a `filePath` arg (`batch_get`, `get_screenshot`, `snapshot_layout`, `export_nodes`, `find_empty_space_on_canvas`, `batch_design`, etc.). The MCP server runs on the user's Mac and treats `filePath` as a document-identity key: container paths like `/workspace/extra/...` won't match the document Pencil has loaded under its real Mac path, so those tools will return `[]` or "No node with id". `get_editor_state` itself works without `filePath` so it's path-agnostic — that's why it can succeed while the others fail with the same path. If `batch_get` returns empty but `get_editor_state` shows nodes, you've got the path wrong: copy the path from `get_editor_state`'s "Currently active editor" line.
+  - If `get_editor_state` returns a different file than you requested (or empty), do NOT guess at "version mismatch" — re-issue `open_on_host` with the correct path, or message the user to open the file manually in Pencil.
 
 Important:
 - Design file should have clear & descriptive window/frame names so team handoffs are easier.
@@ -489,7 +509,7 @@ Input:
 Process:
 
 *1. Design Analysis*
-- Open design file via `mcp__pencil__open_document` (called "design.pen" & at repo top level usually). If Pencil MCP is unreachable, first call `mcp__nanoclaw__open_on_host` with `app: "Pencil"` to launch it, wait ~2s, then retry.
+- Open the design file by calling `mcp__nanoclaw__open_on_host` with `app: "Pencil"` and `filePath: "<the .pen path>"` (typically `/workspace/extra/<repo>/design.pen` or `/workspace/group/design.pen`). Wait ~2s, then `mcp__pencil__get_editor_state` to read it. `mcp__pencil__open_document` alone will NOT load a file from disk — it only mirrors what the user already has open in Pencil's GUI.
 - List all screens with `mcp__pencil__batch_get`
 - Group screens by section/feature to understand the full product surface area
 - Map each screen to: feature name, user type (coach/athlete/admin), core actions, data entities involved

@@ -27,7 +27,8 @@ function resolveExtraMountPath(
 
   const remainder = containerPath.slice(prefix.length);
   const firstSlash = remainder.indexOf('/');
-  const mountName = firstSlash === -1 ? remainder : remainder.slice(0, firstSlash);
+  const mountName =
+    firstSlash === -1 ? remainder : remainder.slice(0, firstSlash);
   const rest = firstSlash === -1 ? '' : remainder.slice(firstSlash + 1);
 
   const group = Object.values(registeredGroups).find(
@@ -245,6 +246,7 @@ export async function processTaskIpc(
     // For open_host
     app?: string;
     url?: string;
+    filePath?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -524,15 +526,33 @@ export async function processTaskIpc(
       break;
 
     case 'open_host': {
-      const result = await handleOpenHost({ app: data.app, url: data.url });
+      // Look up this group's additionalMounts so the host handler can
+      // translate container paths (e.g. /workspace/extra/repo/design.pen)
+      // back to host paths.
+      const groupEntry = Object.values(registeredGroups).find(
+        (g) => g.folder === sourceGroup,
+      );
+      const result = await handleOpenHost({
+        app: data.app,
+        url: data.url,
+        filePath: data.filePath,
+        groupFolder: sourceGroup,
+        additionalMounts: groupEntry?.containerConfig?.additionalMounts,
+      });
       if (result.ok) {
         logger.info(
-          { sourceGroup, app: data.app, url: data.url },
+          { sourceGroup, app: data.app, url: data.url, filePath: data.filePath },
           'open_host request executed',
         );
       } else {
         logger.warn(
-          { sourceGroup, app: data.app, url: data.url, reason: result.reason },
+          {
+            sourceGroup,
+            app: data.app,
+            url: data.url,
+            filePath: data.filePath,
+            reason: result.reason,
+          },
           'open_host request rejected',
         );
       }

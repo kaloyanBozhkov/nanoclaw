@@ -53,7 +53,9 @@ export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
 export const CONTAINER_IMAGE =
-  process.env.CONTAINER_IMAGE || envConfig.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
+  process.env.CONTAINER_IMAGE ||
+  envConfig.CONTAINER_IMAGE ||
+  'nanoclaw-agent:latest';
 // HARD CAP on container runtime in ms. 30 min default. Unlike IDLE_TIMEOUT,
 // this does NOT reset on activity — a runaway agent loop producing constant
 // output still gets killed at exactly this duration from container start.
@@ -68,7 +70,9 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   10,
 ); // 10MB default
 export const CREDENTIAL_PROXY_PORT = parseInt(
-  process.env.CREDENTIAL_PROXY_PORT || envConfig.CREDENTIAL_PROXY_PORT || '3101',
+  process.env.CREDENTIAL_PROXY_PORT ||
+    envConfig.CREDENTIAL_PROXY_PORT ||
+    '3101',
   10,
 );
 export const IPC_POLL_INTERVAL = 1000;

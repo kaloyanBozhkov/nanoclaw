@@ -223,6 +223,28 @@ function buildVolumeMounts(
     mounts.push(...validatedMounts);
   }
 
+  // Notion OAuth credentials (RW so the container can refresh expiring access tokens
+  // under flock — see container/agent-runner/src/notion-token.ts). The whole
+  // directory is mounted (not just the JSON) so the lockfile lands on a shared
+  // host path and serializes refreshes across concurrent containers. Bypasses
+  // additionalMounts allowlist because it's internal nanoclaw infra, not user data.
+  if (group.containerConfig?.enableNotion) {
+    const notionDir = path.join(os.homedir(), '.config', 'nanoclaw', 'notion');
+    const notionTokenFile = path.join(notionDir, 'oauth.json');
+    if (fs.existsSync(notionTokenFile)) {
+      mounts.push({
+        hostPath: notionDir,
+        containerPath: '/workspace/secrets/notion',
+        readonly: false,
+      });
+    } else {
+      logger.warn(
+        { group: group.name },
+        'enableNotion=true but ~/.config/nanoclaw/notion/oauth.json missing — run `npm run notion-auth`',
+      );
+    }
+  }
+
   return mounts;
 }
 

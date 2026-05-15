@@ -48,6 +48,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { addPin, formatPinList, listPins, removePin } from './pinned.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -523,9 +524,7 @@ function formatInfoSummary(
   }
   if (mainActivity?.lastText) {
     const snippet = mainActivity.lastText.slice(0, 220);
-    parts.push(
-      `"${snippet}${mainActivity.lastText.length > 220 ? '…' : ''}"`,
-    );
+    parts.push(`"${snippet}${mainActivity.lastText.length > 220 ? '…' : ''}"`);
   }
   if (!mainActivity?.lastTool && !mainActivity?.lastText) {
     parts.push('_(no activity in transcript yet)_');
@@ -542,9 +541,7 @@ function formatInfoSummary(
       if (sa.lastTool) parts.push(`  ↳ ${formatToolLine(sa.lastTool)}`);
       if (sa.lastText) {
         const snippet = sa.lastText.slice(0, 180);
-        parts.push(
-          `  ↳ "${snippet}${sa.lastText.length > 180 ? '…' : ''}"`,
-        );
+        parts.push(`  ↳ "${snippet}${sa.lastText.length > 180 ? '…' : ''}"`);
       }
       if (!sa.lastTool && !sa.lastText) {
         parts.push('  ↳ _(no activity yet)_');
@@ -929,6 +926,47 @@ async function main(): Promise<void> {
     }
   }
 
+  // /pin <text>, 📌 <text>, /pins, /unpin <n> — manage durable pinned
+  // instructions for this group. Intercepted before storage so the bot's
+  // conversation isn't polluted; pins are written to groups/<folder>/CLAUDE.md
+  // under a dedicated section and become part of the system prompt on every
+  // future container run, surviving compactions and restarts.
+  async function handlePinCommand(
+    chatJid: string,
+    rawText: string,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    const text = rawText.trim();
+    if (text === '/pins') {
+      await channel.sendMessage(chatJid, formatPinList(listPins(group.folder)));
+      return;
+    }
+    const unpinMatch = /^\/unpin\s+(\d+)\s*$/.exec(text);
+    if (unpinMatch) {
+      const result = removePin(group.folder, parseInt(unpinMatch[1], 10));
+      await channel.sendMessage(chatJid, result.message);
+      return;
+    }
+    // /pin <text> or 📌 <text>
+    let payload: string | null = null;
+    if (text.startsWith('/pin ')) payload = text.slice(5);
+    else if (text.startsWith('📌')) payload = text.slice('📌'.length);
+    if (payload === null) return;
+    const result = addPin(group.folder, payload);
+    await channel.sendMessage(chatJid, result.message);
+  }
+
+  function isPinCommand(text: string): boolean {
+    if (text === '/pins' || /^\/unpin\s+\d+\s*$/.test(text)) return true;
+    if (text.startsWith('/pin ')) return true;
+    if (text.startsWith('📌')) return true;
+    return false;
+  }
+
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
@@ -955,6 +993,14 @@ async function main(): Promise<void> {
       if (trimmed === '/info') {
         handleInfo(chatJid).catch((err) =>
           logger.error({ err, chatJid }, 'Info command error'),
+        );
+        return;
+      }
+
+      // /pin /unpin /pins / 📌 — pin management
+      if (isPinCommand(trimmed)) {
+        handlePinCommand(chatJid, trimmed).catch((err) =>
+          logger.error({ err, chatJid }, 'Pin command error'),
         );
         return;
       }
