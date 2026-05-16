@@ -541,7 +541,12 @@ export async function processTaskIpc(
       });
       if (result.ok) {
         logger.info(
-          { sourceGroup, app: data.app, url: data.url, filePath: data.filePath },
+          {
+            sourceGroup,
+            app: data.app,
+            url: data.url,
+            filePath: data.filePath,
+          },
           'open_host request executed',
         );
       } else {

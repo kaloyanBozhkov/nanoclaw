@@ -107,11 +107,17 @@ export function addPin(folder: string, text: string): PinResult {
   const parsed = parsePinnedSection(content);
   // De-dupe: if an identical pin already exists, no-op.
   if (parsed.pins.includes(trimmed)) {
-    return { ok: true, message: `Already pinned (#${parsed.pins.indexOf(trimmed) + 1}).` };
+    return {
+      ok: true,
+      message: `Already pinned (#${parsed.pins.indexOf(trimmed) + 1}).`,
+    };
   }
   parsed.pins.push(trimmed);
   writeClaudeMd(folder, parsed);
-  return { ok: true, message: `📌 Pinned (#${parsed.pins.length}): ${trimmed}` };
+  return {
+    ok: true,
+    message: `📌 Pinned (#${parsed.pins.length}): ${trimmed}`,
+  };
 }
 
 export function listPins(folder: string): string[] {
@@ -141,7 +147,8 @@ export function removePin(folder: string, indexOneBased: number): PinResult {
 }
 
 export function formatPinList(pins: string[]): string {
-  if (pins.length === 0) return 'No pins set. Pin with `/pin <text>` or `📌 <text>`.';
+  if (pins.length === 0)
+    return 'No pins set. Pin with `/pin <text>` or `📌 <text>`.';
   return (
     '📌 *Pinned context:*\n' +
     pins.map((p, i) => `${i + 1}. ${p}`).join('\n') +

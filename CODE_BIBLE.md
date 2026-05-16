@@ -232,3 +232,7 @@ Atoms → Molecules → Organisms → Templates → Pages
 - @koko420/shared has helpers such as retry, date etc..
 - @koko420/ai-tools has getOpenRouterLLMResponse, translateKeys and other useful functions.
 - @koko420/components has UI componenets that are useful across apps
+
+
+
+Github: Always commit from kaloyan@bozhkov.com email when project is part of kaloyanBozhkov github acc. Never let bots commit using their own emails or aliases. Thanks.
