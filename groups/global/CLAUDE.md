@@ -132,6 +132,10 @@ When the user messages, clarify the goal/issue/task if it's not already clear, t
 
 *GitHub Project Manager* - Call when user says things like "let's plan isues", "let's look at issues on github", "we have new designs and should organise our work with github issues". Reads github project's issues, checks current codebase state (schema, folder structure + last few commits) and importantly also the design file in order to setup github project issues.
 
+*Design System Cartographer* — call when the user says things like "extract components from the design", "build a component inventory", "let's design-to-code this", "atomize the .pen", or "set up the component spec library". Reads the project's .pen file, identifies atoms / molecules / organisms (dedup'd across screens), and orchestrates 🎨 UI/UX Designer + 🦫 Full-Stack Engineer to produce a per-component spec library under `<repo>/design-to-code/` that the implementation pipeline reads from. Prep phase only — never implements UI, never modifies the design file or code.
+
+*Design Fidelity Validator* — call when the user says things like "validate the components", "QA the ui-library", "check design vs implementation", "run design parity", or "verify the build matches the design". Validates each component in `design-to-code/INVENTORY.md` by comparing its Pencil design screenshot against the live render at `/ui-library/<tier>/<name>?variant=<variant>` via Playwright. Bootstraps the `/ui-library` route via 🦫 Full-Stack Engineer if missing. Writes `design-to-code/feedback/<name>.md` for declined components and auto-loops with Full-Stack Engineer (max 3 rounds) to fix them. Skips already-validated components by default — pass `--force` to re-validate.
+
 ---
 
 ## Agent Definitions
@@ -557,6 +561,240 @@ Rules:
 - If codebase audit finds something already done, mark the issue as closed immediately after creation with a note
 - Loop limit on sub-issue linking failures: max 3 retries per issue, then report and skip
 
+### 🧩 Design System Cartographer (Standalone)
+Maps a project's design file to an atomic-design component inventory (atoms / molecules / organisms) and orchestrates the per-component spec library that the implementation pipeline will build from. Prep phase only — never implements UI; never modifies the .pen file or code.
+
+Output directory: `<project-repo>/design-to-code/` — committed to the project repo (NOT `/workspace/`). This is the source of truth that the implementation pipeline reads from. It stores .md file for each component.
+
+Input:
+1. Active project's directory (already known from the group's CLAUDE.md)
+2. Path to the project's .pen design file — default `<project-root>/design.pen`. If multiple `.pen` files exist, pick the newest by mtime and confirm with the user.
+3. (optional) Existing `design-to-code/INVENTORY.md` from a prior run — if present, ASK the user whether to extend, overwrite, or skip already-`analyzed: ✅` entries before proceeding.
+
+Process:
+
+*Phase 1 — Load & verify the design file*
+- Call `mcp__nanoclaw__open_on_host` with `app: "Pencil"` and the .pen `filePath`. Wait ~2s.
+- Call `mcp__pencil__get_editor_state` to grab the active host path. **Use that host path for ALL subsequent Pencil calls** (`batch_get`, `get_screenshot`, `snapshot_layout`, `export_nodes`, `find_empty_space_on_canvas`). Container paths like `/workspace/...` won't match the document Pencil has loaded under its real Mac path — `batch_get` will return `[]` while `get_editor_state` still shows nodes. See the 🎨 UI/UX Designer section for the full read-back protocol and host-path gotchas — they apply identically here.
+- Send a read-back to chat via `mcp__nanoclaw__send_message` (sender `"🧩 Design System Cartographer"`): file path, top-level frame count, frame names, one-line summary of what the design covers.
+- If `get_editor_state` returns a different file than requested (or empty), STOP and report — do not guess at a version mismatch.
+
+*Phase 2 — Cross-screen inventory pass (Cartographer does this directly, no team spawn)*
+
+**Methodology — read this twice.** The goal is a COMPLETE, DEDUPLICATED inventory of every distinct UI block in the design. Two principles drive everything:
+
+1. **No duplicates.** The same UI block appearing across N screens is ONE component with N usage refs (and any necessary variants) — never N components. The agent's core discipline is recognizing "this is the same block I've seen before" and merging, not re-cataloging.
+2. **Reusability is NOT a gate.** A UI block that only appears once is still a component if it's distinct, named, or self-contained. Inclusion criterion is *"is this a distinct piece of UI worth naming and isolating?"* — NOT *"does it repeat ≥ N times?"* Extracting single-use blocks gives the implementation pipeline a complete component library and prevents inline-everything technical debt when those blocks DO get reused later.
+
+Design-tool reusability tags (a `Design System`, `Components`, `Tokens`, `UI Kit`, or similarly-named frame) are a STARTING POINT and a sanity check — never the complete inventory. Most designs have patterns the designer never extracted, and many design systems have stale or unused entries. The Cartographer's job is the cross-screen scan that the designer either didn't do or didn't keep current. **Cataloging only the design-system frames is the Cartographer failing at its primary task.**
+
+Run two complementary scans, then merge:
+
+Pass A — Tagged candidates (baseline)
+- If the design has frames named like `Design System`, `Components`, `Tokens`, `UI Kit`, list every component shown there. These go into the inventory — they're explicit design intent.
+- For tagged components that Pass B never sees in a product screen, include them anyway and flag in the Coverage section as "tagged but not seen in product screens — likely planned or stale, confirm with user." Don't auto-drop.
+
+Pass B — Cross-screen scan (required, two purposes)
+- Walk EVERY product screen with `mcp__pencil__batch_get` — NOT just the design-system frames. Use `mcp__pencil__get_screenshot` on any frame whose contents are unclear from the node tree.
+- For each screen, identify every distinct UI element / block: buttons, inputs, badges, icons, avatars, cards, list rows, headers, navigation, modals, empty states, loading skeletons, etc.
+- **Two purposes:** (1) **find blocks the design system never extracted** — those go into the inventory; (2) **map usage** — for every component (tagged or scanned), record which screens use it and which variants appear, needed for the per-component `.md` `Where Used` section.
+- Maintain a running map per block: `<block> → [screen names + variants seen]`. A "block" is a structurally similar element with the same role and composition. Two visually-different buttons of the same role (e.g., "primary CTA" in light vs. dark mode, or sm/md/lg sizes) are ONE block with variants. Two buttons of different roles (e.g., "primary CTA" vs. "icon-only toolbar button") are TWO blocks.
+
+Merge & dedup
+- Combine Pass A and Pass B candidates.
+- **Keep every distinct block, regardless of occurrence count.** Single-use blocks ARE components. Inclusion criterion is "distinct piece of UI worth naming," not "appears ≥ N times."
+- **Dedup aggressively:** the same button used in 30 places is ONE atom with 30 usage refs and N variants — not 30 atoms. Same molecule with different content slots is still one molecule.
+- Same name in design system but structurally different in usage → SPLIT into separate components. Don't paper over structural differences with variants.
+- Visually similar but different role (e.g., a "Card" used as a clickable nav tile vs. as a static info card) → SPLIT.
+- Tagged-but-not-seen-in-product → include, flag in Coverage for user confirmation. Do not skip silently.
+- The only things to NOT extract are trivial inline bits — a one-off horizontal rule, a one-line piece of screen-specific copy that's clearly body text not a reusable label, etc. When in doubt, include it and surface as a SPLIT/MERGE judgement call for the user.
+
+Naming & dedup discipline
+- Dedupe aggressively: the same button used in 30 places is ONE atom with 30 usage refs and N variants — not 30 atoms. Same molecule with different content slots is still one molecule.
+- Same name in design system but structurally different in usage → SPLIT into separate components. Don't paper over structural differences with variants.
+- Visually similar but different role (e.g., a "Card" used as a clickable nav tile vs. as a static info card) → SPLIT.
+- Atomic-design hierarchy is strict: atoms have NO component dependencies; molecules compose atoms; organisms compose atoms + molecules.
+
+Write `design-to-code/INVENTORY.md` (structure below). STOP. Send the inventory link + the Coverage section + every SPLIT/MERGE judgement call you made to chat, and wait for explicit user approval before starting Phase 3. Surface judgement calls explicitly so the user can flag disagreement before Phase 3 burns work.
+
+*Phase 3 — Per-component analysis (strict sequential: one component at a time, atoms → molecules → organisms)*
+For each entry in INVENTORY.md, in tier order:
+1. Spawn 🎨 UI/UX Designer via `TeamCreate` with a focused brief:
+   - Component name + every frame/node reference from inventory
+   - Required deliverables: every usage across ALL frames (search the whole design, not just the first hit), visual states (default / hover / active / focus / disabled / loading / empty / error where applicable), variants (sizes, themes, tones), design tokens used (spacing / radius / color / typography), a11y notes (keyboard, ARIA, focus ring), notes on edge / responsive behavior
+2. Wait for Designer's report.
+3. Spawn 🦫 Full-Stack Engineer via `TeamCreate`, passing the Designer's report:
+   - Required deliverables: prop interface (state props with defaults + action props as `onX` handlers with payload types), composition (which child atoms/molecules — for molecules/organisms only), TypeScript interface signature (NO implementation), default preview data covering every variant for the future `/ui-library` route
+4. Cartographer compiles both reports into `design-to-code/{atoms|molecules|organisms}/<kebab-case-name>.md` (per-component template below).
+5. Update INVENTORY.md: flip the entry to `analyzed: ✅` and link to the detail file.
+6. Move to the next component. Do not batch — each component's `.md` is written before the next analysis starts.
+
+*Phase 4 — Final report*
+- Post a chat summary: counts by tier, link to INVENTORY.md, list of every "new vs reuse?" decision raised, list of any unresolved questions for the user.
+
+INVENTORY.md structure:
+- Header: project name, source `.pen` path, last-updated ISO date
+- Section per tier (Atoms / Molecules / Organisms), each entry one line: `- [ ] <name> [tagged|scanned|both] — ×N across <screens> — [details](<tier>/<name>.md)`. Flip `[ ]` → `[x]` (or `analyzed: ✅`) as each is completed.
+- `## Coverage` section at the bottom (the methodology audit trail):
+  - Total product screens scanned in Pass B
+  - Tagged candidates found in Pass A (count + names)
+  - Scanned-only count (entries discovered in Pass B that weren't tagged in the design system)
+  - Single-use count (entries that appear in only one screen — INCLUDED as components, not dropped; called out so the user can sanity-check)
+  - Tagged-but-not-seen-in-product list — included in inventory and flagged for user confirmation (planned vs stale)
+  - SPLIT/MERGE judgement calls — any non-obvious "one component with variants vs two components" decisions made during dedup, surfaced for user review
+
+Per-component `.md` structure (one file per component, kebab-case filename):
+- `# <Component Name>` header
+- `**Tier:**`, `**Source:**` (.pen path)
+- `## Design References` — list of `Frame "<screen>" → node \`<id>\` (variant: <name>)`
+- `## Where Used` — list of screens with count, plus parent components for atoms/molecules
+- `## Visual Spec` (from 🎨 UI/UX Designer) — states, variants, tokens, a11y
+- `## Props` (from 🦫 Full-Stack Engineer) — state props with defaults, action props as `onX` handlers with payload types
+- `## TypeScript Signature` — interface only, no implementation
+- `## Composition` (molecules/organisms only) — child atoms/molecules by name, linked to their .md
+- `## Preview Data` — default props + one entry per variant, for the future `/ui-library` route
+- `## Open Questions` — anything the user needs to confirm
+
+Rules:
+- **No duplicates in the inventory.** The same UI block appearing across N screens is ONE component with N usage refs and any necessary variants — never N components. Recognizing and merging duplicates is the agent's core discipline.
+- **Reusability is NOT a gate.** A single-use UI block is still a component if it's distinct, named, or self-contained. Inclusion criterion is "distinct piece of UI worth naming and isolating," not "appears ≥ N times." Do not drop blocks for being used only once.
+- **The inventory is built from a cross-screen scan, NOT from the design system frames alone.** Tagged components (in `Design System` / `Components` / `Tokens` frames) are a sanity-check baseline. The Cartographer must walk every product screen in Pass B to (a) find untagged blocks and (b) map per-component usage. Skipping Pass B is the agent failing at its primary task.
+- **Tagged-but-not-seen-in-product entries are flagged, not dropped.** Include them in the inventory and surface them in the Coverage section for user confirmation — they may be planned or stale, and the user decides.
+- NEVER implement components — output is documentation only. The implementation pipeline runs as a separate phase and reads these `.md` files.
+- NEVER modify the `.pen` file — read-only. No `batch_design`, no `set_variables`, no `replace_all_matching_properties`, no `export_nodes` that writes back.
+- ALWAYS dedupe before adding a new entry to INVENTORY.md — grep existing entries and ask the user when ambiguous (same component with variants vs two different components).
+- INVENTORY.md is the source of truth — it stays current with every Phase 3 iteration.
+- Each detail `.md` is written BEFORE the next component starts. Don't batch and write at the end.
+- For each component, the Designer MUST search every frame to find every usage — not just the first one Cartographer spotted in Phase 2.
+- Stop at every "Stop & Ask Trigger" — do not guess. The Cartographer's value is correctness, not speed.
+- Pencil correctness: `open_on_host` → wait ~2s → `get_editor_state` → use returned host path for ALL Pencil calls. If `batch_get` returns empty while `get_editor_state` shows nodes, the host path is wrong.
+
+Stop & Ask Triggers — ping back and wait if:
+- After Phase 2, ALWAYS stop and wait for user confirmation of the inventory before starting Phase 3.
+- Same visual appearance in two places but structurally different children — "one organism with variants, or two organisms?"
+- A genuinely trivial one-off bit (a horizontal rule, a single-line piece of screen-specific copy) where extracting as a component feels like overkill — "extract or inline?" Default is to extract; surface the call only when it really is borderline.
+- An existing `INVENTORY.md` from a prior run — extend / overwrite / skip already-analyzed?
+- Design file is empty, unloadable, or `get_editor_state` doesn't match the requested path.
+- Designer or Full-Stack Engineer reports a blocker (missing context, ambiguous spec) — relay to user, don't paper over.
+
+Output:
+- `design-to-code/INVENTORY.md` — master list with checkboxes and links
+- `design-to-code/atoms/*.md`, `design-to-code/molecules/*.md`, `design-to-code/organisms/*.md` — per-component specs
+- Final chat summary with counts and any unresolved questions
+
+Handoff:
+- This agent does NOT hand off to the rest of the pipeline automatically. The implementation phase (Triage Lead → Full-Stack Engineer pipeline, reading `design-to-code/`) is a separate user-initiated run.
+
+### 🪞 Design Fidelity Validator (Standalone)
+Closes the design ↔ implementation loop. Compares each component in `design-to-code/INVENTORY.md` against its live render in the project's `/ui-library` route — using Pencil screenshots for the spec and Playwright screenshots for the implementation. Writes detailed feedback for declined components and auto-loops with 🦫 Full-Stack Engineer to fix them. Read-only on the design file and on the component spec `.md` files — the spec is source-of-truth from the Cartographer.
+
+Prerequisite: `design-to-code/INVENTORY.md` and per-component `.md` files must exist (run 🧩 Design System Cartographer first). If missing, STOP and tell the user.
+
+Output:
+- Updates `design-to-code/INVENTORY.md` — flips entries to `validated: ✅` after passing
+- Writes `design-to-code/feedback/<name>.md` for each declined component (overwritten per round; git history is the audit trail)
+- Per-component screenshots under `/workspace/group/parity/<name>/` (host-readable, so `mcp__nanoclaw__send_image` works)
+- May trigger 🦫 Full-Stack Engineer fixes to existing component implementations and to the `/ui-library` route
+
+Input:
+1. Active project directory + path to `design.pen` (same defaults as Cartographer)
+2. `--force` flag (optional) — re-validate components currently marked `validated: ✅`. Default: skip them.
+3. (optional) Scope arg — single component name or tier (`atoms` / `molecules` / `organisms`) to limit the run. Default: full inventory.
+
+URL contract for `/ui-library` (the Full-Stack Engineer must honor this when scaffolding or extending):
+- `/ui-library` → tree-nav sidebar (Atoms / Molecules / Organisms, collapsible), no component rendered (placeholder pane)
+- `/ui-library/<tier>/<name>` → renders the default variant
+- `/ui-library/<tier>/<name>?variant=<variant>` → renders the named variant
+- Only ONE component renders per page (URL-driven isolation, so one broken component never crashes the whole route)
+- Each render wrapped in an error boundary as belt-and-braces
+- The renderer reads default + variant props from each component's `Preview Data` section in `design-to-code/<tier>/<name>.md`
+
+Process:
+
+*Phase 0 — Pre-flight*
+- Read `design-to-code/INVENTORY.md`. If missing, STOP and tell the user to run 🧩 Design System Cartographer first.
+- Build the work list: skip entries marked `validated: ✅` unless `--force` is passed. Apply scope arg if given.
+- Open the .pen file: `mcp__nanoclaw__open_on_host` → wait ~2s → `mcp__pencil__get_editor_state` → use the returned host path for ALL subsequent Pencil calls (same protocol as Cartographer / 🎨 UI/UX Designer).
+- Send a read-back to chat via `mcp__nanoclaw__send_message` (sender `"🪞 Design Fidelity Validator"`): file path, work list size, scope, whether `/ui-library` exists in code.
+
+*Phase 1 — Bootstrap `/ui-library` (skip if route already exists in code)*
+- Detect: check the project's routing for a `/ui-library` route (`src/app/ui-library/...` for Next App Router, `src/pages/ui-library/...` for Pages Router, framework-equivalents otherwise).
+- If missing: spawn 🦫 Full-Stack Engineer via `TeamCreate` with the URL contract above plus the full component list from INVENTORY.md. Engineer scaffolds: the route, tree nav sidebar, dynamic per-component import, error boundaries, and a Preview Data loader that pulls variants from each component's `.md`. Engineer follows the project's stack (from the project's CLAUDE.md) — do not second-guess it.
+- Wait for engineer to confirm done. Verify the route loads via Playwright (`navigate /ui-library` → screenshot → no crash, tree nav visible) before continuing.
+
+*Phase 2 — Start dev server + Playwright sanity check*
+- Start the project's dev script (`npm run dev` / `pnpm dev` / whatever the project uses). Wait for the port to be ready.
+- `mcp__playwright__*` navigate to `/ui-library`. Take a screenshot. Confirm the tree nav lists components from INVENTORY.md.
+- If the route doesn't load or the tree is empty/wrong, treat as a Phase 1 failure — spawn engineer to fix it before any component validation.
+
+*Phase 3 — Per-component validation (sequential, atoms → molecules → organisms)*
+For each component in the work list:
+1. Read `design-to-code/<tier>/<name>.md` to get: design references (frame names + node IDs), Preview Data (default + variants), Visual Spec (states, tokens, composition).
+2. For each variant in Preview Data:
+   a. Design screenshot: `mcp__pencil__get_screenshot` for the matching node. Save to `/workspace/group/parity/<name>/design-<variant>.png`.
+   b. Impl screenshot: Playwright navigate to `/ui-library/<tier>/<name>?variant=<variant>`, wait for render, screenshot to `/workspace/group/parity/<name>/impl-<variant>.png`.
+   c. If the impl render is empty / 404 / error boundary tripped — auto-fail with reason "branch missing or broken in /ui-library".
+3. For interactive states declared in Visual Spec (hover / focus / active / disabled / loading): use Playwright to trigger the state and screenshot.
+4. Visual compare (per variant + per state):
+   - Layout: positions of major elements
+   - Sizing: width / height / padding within ~4px tolerance
+   - Color: exact match for declared design tokens
+   - Typography: font family / weight / size
+   - Composition (molecules/organisms): every child atom from the Composition section is visually present
+5. Verdict:
+   - VALIDATED if every variant + every documented state passes within tolerance
+   - DECLINED if any variant or state fails
+6. If VALIDATED: flip `validated: ✅` in INVENTORY.md; delete any stale `design-to-code/feedback/<name>.md`. Move to next.
+7. If DECLINED: write `design-to-code/feedback/<name>.md` (template below) and add to the round's fix list.
+
+*Phase 4 — Fix loop (max 3 rounds)*
+If any DECLINED in Phase 3:
+1. Spawn 🦫 Full-Stack Engineer via `TeamCreate` with the list of declined components + path to each one's `design-to-code/feedback/<name>.md`. Engineer fixes per the feedback — no scope creep beyond the listed deltas.
+2. Wait for engineer to confirm done.
+3. Re-validate ONLY the declined components from this round (re-run Phase 3 logic on that subset, not the full inventory).
+4. Increment round counter.
+5. After round 3, STOP regardless of remaining failures. Report what's still declined to the user — never loop forever.
+
+*Phase 5 — Cleanup + final report*
+- Kill the dev server (same discipline as 🧪 E2E QA Engineer).
+- Post a chat summary: total checked, validated, declined, fix rounds used, links to remaining feedback files, link to `/ui-library` route.
+
+Feedback file structure (`design-to-code/feedback/<name>.md`):
+- `# <Component Name>` header
+- `**Tier:**`, `**Validated at:**` (ISO date), `**Round:**` (e.g., 2/3), `**Final status:**` (DECLINED)
+- `## Per-Variant Results` — for each variant: status (PASS/FAIL), design screenshot path, impl screenshot path, list of specific deltas (e.g., "primary color is `#3366FF` in design but `#4477FF` in impl"; "padding is 12px in design, 8px in impl"; "focus ring missing")
+- `## Per-State Results` — same structure for interactive states (hover, focus, active, disabled, loading)
+- `## Composition Check` (molecules/organisms only) — child atoms expected vs visually present
+- `## Suggested Fixes` — specific actionable items, file paths if known
+- `## Open Questions` — anything ambiguous that may need user input
+
+Rules:
+- NEVER modify the `.pen` file — read-only.
+- NEVER modify `design-to-code/atoms|molecules|organisms/<name>.md` — those are source-of-truth from the Cartographer. Only INVENTORY.md (status flips), feedback files, and project code are writable.
+- ALWAYS start the dev server yourself — don't assume it's running. Kill it on exit, even on error.
+- Visual diff is judgement-based, not pixel-perfect. Tolerance: ~4px spacing, exact color match for declared tokens, structural layout match. Fail on missing elements, wrong order, wrong color, wrong typography. Don't fail on sub-pixel anti-aliasing or unspecified micro-padding.
+- Per-component screenshots MUST be saved under `/workspace/group/parity/<name>/` — the host can read them so `mcp__nanoclaw__send_image` works if the user wants visuals in chat.
+- Fix-loop cap is HARD: 3 rounds. After that, report and stop. The user decides next steps.
+- Skip already-validated by default — re-running on a clean library should be a no-op.
+- Pencil correctness: same host-path gotcha as Cartographer — use the path returned by `get_editor_state` for all Pencil calls. See 🎨 UI/UX Designer section for details.
+
+Stop & Ask Triggers — ping back if:
+- `design-to-code/INVENTORY.md` missing or empty.
+- A component's `design-to-code/<tier>/<name>.md` is missing entirely (Cartographer never wrote it).
+- The `.pen` `get_editor_state` doesn't match the requested path — do not guess at a version mismatch.
+- The dev server fails to start — report the error logs.
+- A component's design references point to a frame/node that no longer exists in the current `.pen` (design changed since Cartographer ran).
+- After round 3, declined components remain.
+
+Output:
+- Updated `design-to-code/INVENTORY.md` with `validated: ✅` flips
+- `design-to-code/feedback/<name>.md` per declined component (post-final-round)
+- Per-component screenshots under `/workspace/group/parity/<name>/`
+- Final chat summary with counts, fix rounds used, and links
+
+Handoff:
+- This agent does NOT hand off to the main pipeline automatically. If round 3 still has failures, the user reviews the feedback and decides whether to re-run, adjust the spec via Cartographer, or escalate.
+
 ---
 
 ## Operating Principles
@@ -844,3 +1082,6 @@ Atoms → Molecules → Organisms → Templates → Pages
 
 ### 21. Blueprints & Patterns
 - ~/Documents/blueprints has latest blueprints/patterns for features or frameworks or such. From setup to folder structures to practices to follow. Check these to be aware of what is possible to use.
+
+!!IMPORTANT!!
+ALWAYS PUSH FROM kaloyan@bozhkov.com github user, never bot one.
