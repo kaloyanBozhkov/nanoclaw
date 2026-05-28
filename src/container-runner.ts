@@ -129,6 +129,18 @@ function buildVolumeMounts(
     });
   }
 
+  // Shared rules directory (read-only for all containers). Holds files like
+  // CODE_BIBLE.md that global/CLAUDE.md inlines via `@<file>.md` import markers,
+  // resolved by the agent-runner against /workspace/rules.
+  const rulesDir = path.join(projectRoot, 'rules');
+  if (fs.existsSync(rulesDir)) {
+    mounts.push({
+      hostPath: rulesDir,
+      containerPath: '/workspace/rules',
+      readonly: true,
+    });
+  }
+
   // Per-group Claude sessions directory (isolated from other groups)
   // Each group gets their own .claude/ to prevent cross-group session access
   const groupSessionsDir = path.join(

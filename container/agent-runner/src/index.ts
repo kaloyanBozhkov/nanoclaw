@@ -490,11 +490,28 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
+  // Resolve `@<file>.md` import markers in global CLAUDE.md against the shared
+  // read-only /workspace/rules directory (e.g. `@CODE_BIBLE.md`). Tokens that
+  // don't resolve to an existing rules file — including package names like
+  // `@koko420/ai-tools` or `@t3-oss/env-nextjs`, which don't end in `.md` — are
+  // left untouched. Single-level resolution only (imported files aren't scanned).
+  const RULES_DIR = '/workspace/rules';
+  const resolveRuleImports = (text: string): string =>
+    text.replace(/@([A-Za-z0-9_\-./]+\.md)\b/g, (match, rel: string) => {
+      if (rel.includes('..')) return match;
+      const filePath = path.join(RULES_DIR, rel);
+      if (!filePath.startsWith(RULES_DIR + path.sep)) return match;
+      if (!fs.existsSync(filePath)) return match;
+      return fs.readFileSync(filePath, 'utf-8');
+    });
+
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
-    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
+    globalClaudeMd = resolveRuleImports(
+      fs.readFileSync(globalClaudeMdPath, 'utf-8'),
+    );
   }
 
   // Discover additional directories mounted at /workspace/extra/*

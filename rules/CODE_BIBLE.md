@@ -222,17 +222,18 @@ Atoms → Molecules → Organisms → Templates → Pages
 - **Bloated Atom:** Contains business logic.
 - **Smart Molecule:** Fetches data or has domain logic.
 - **God Organism:** Page-level orchestration.
-- **Tangled Dependencies:** Cross-layer coupling.
-
+- 
 ### 20. Translations & Localization
 - If project has localization setup, handle the english json keys only (or the default language's json)
 - User will handle translating keys for other locales
 
-### 21. God's packages to use where fitting. Check these to dermine if useful for the current project.
+### 21. Blueprints & Patterns
+- ~/Documents/blueprints has latest blueprints/patterns for features or frameworks or such. From setup to folder structures to practices to follow. Check these to be aware of what is possible to use.
+
+### 22. God's packages to use where fitting. Check these to dermine if useful for the current project.
 - @koko420/shared has helpers such as retry, date etc..
 - @koko420/ai-tools has getOpenRouterLLMResponse, translateKeys and other useful functions.
 - @koko420/components has UI componenets that are useful across apps
 
-
-
+!!IMPORTANT!!
 Github: Always commit from kaloyan@bozhkov.com email when project is part of kaloyanBozhkov github acc. Never let bots commit using their own emails or aliases. Thanks.
