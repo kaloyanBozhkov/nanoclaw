@@ -198,18 +198,12 @@ ESLint 9 with flat config (`eslint.config.js` at root):
 
 ## Designs
 
-Local mirrors of Claude Design projects live in `/workspace/group/designs/<name>/`.
+Read Claude Design links with the `mcp__design__*` tools — see the "Claude Design
+links" section in the global memory for how. Known project:
 
-**Never try to open a `claude.ai/design/...` URL with `agent-browser`.** Those pages sit
-behind a claude.ai login *and* a Cloudflare bot challenge — the browser gets a
-`403 Just a moment…` interstitial and you will hang waiting for a page that never loads.
-Check `/workspace/group/designs/` for a mirror instead; if the link isn't mirrored yet,
-say so in chat and ask Kaloyan to sync it (he can pull it with the `DesignSync` tool from
-a Claude Code session that has the claude.ai login).
-
-| Mirror | Source project |
+| Project | `project_id` |
 |---|---|
-| `designs/memory-screens/` | "Edit Memory redesign directions" — Memory Details (`2d`), Edit Memory (`3a`/`3b`), voice capture (`4a`). See its `README.md`. |
+| Edit Memory redesign directions — Memory Details (`2d`), Edit Memory (`3a`/`3b`), voice capture (`4a`) | `b8b97c68-caa9-4b47-ac04-b40bd8803ec9` |
 
 ## Blueprints
 

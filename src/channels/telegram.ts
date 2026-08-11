@@ -4,11 +4,25 @@ import https from 'https';
 import os from 'os';
 import path from 'path';
 
-import { Api, Bot, InputFile } from 'grammy';
+import {
+  Api,
+  Bot,
+  GrammyError,
+  HttpError,
+  InlineKeyboard,
+  InputFile,
+} from 'grammy';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import {
+  formatBytes,
+  formatResetFileList,
+  formatResetPreview,
+  ResetPreview,
+  TELEGRAM_MAX_CHARS,
+} from '../session-reset.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -139,7 +153,92 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   onResetSession: (groupFolder: string) => void;
+  onPreviewReset: (groupFolder: string) => ResetPreview;
   registeredGroups: () => Record<string, RegisteredGroup>;
+}
+
+/**
+ * Unpack a Telegram failure into something greppable.
+ *
+ * A bare `err.message` on a GrammyError drops the method, error code, and
+ * description — which is how a 400 MESSAGE_TOO_LONG once presented itself as a
+ * button that simply did nothing.
+ */
+function describeTelegramError(err: unknown): Record<string, unknown> {
+  if (err instanceof GrammyError) {
+    return {
+      err: err.message,
+      method: err.method,
+      errorCode: err.error_code,
+      description: err.description,
+    };
+  }
+  if (err instanceof HttpError) {
+    return { err: err.message, cause: String(err.error) };
+  }
+  return { err: err instanceof Error ? err.message : String(err) };
+}
+
+/**
+ * Edit a message, falling back to a fresh reply when the edit is rejected.
+ *
+ * A swallowed edit failure is indistinguishable from a dead button, so this
+ * never fails silently: it truncates to Telegram's limit, and if the edit is
+ * still refused it posts the text as a new message.
+ */
+async function editOrReply(
+  ctx: {
+    editMessageText: (text: string, extra?: object) => Promise<unknown>;
+    reply: (text: string, extra?: object) => Promise<unknown>;
+  },
+  text: string,
+  extra?: object,
+): Promise<void> {
+  const body =
+    text.length > TELEGRAM_MAX_CHARS
+      ? `${text.slice(0, TELEGRAM_MAX_CHARS - 1)}…`
+      : text;
+  try {
+    await ctx.editMessageText(body, extra);
+  } catch (err) {
+    logger.warn(
+      describeTelegramError(err),
+      'editMessageText failed — replying instead',
+    );
+    try {
+      await ctx.reply(body, extra);
+    } catch (replyErr) {
+      logger.error(
+        describeTelegramError(replyErr),
+        'Fallback reply also failed',
+      );
+    }
+  }
+}
+
+/** Acknowledge a callback; never let the ack itself break the handler. */
+async function safeAnswer(
+  ctx: { answerCallbackQuery: (arg?: object) => Promise<unknown> },
+  text?: string,
+  showAlert = false,
+): Promise<void> {
+  try {
+    await ctx.answerCallbackQuery(
+      text ? { text, show_alert: showAlert } : undefined,
+    );
+  } catch (err) {
+    logger.debug(describeTelegramError(err), 'answerCallbackQuery failed');
+  }
+}
+
+/** How long a pending `/new` confirmation stays answerable. */
+const RESET_CONFIRM_TTL_MS = 2 * 60 * 1000;
+
+interface PendingReset {
+  groupFolder: string;
+  /** Only the user who ran `/new` may answer it. */
+  senderId: number;
+  expiresAt: number;
 }
 
 /**
@@ -171,6 +270,8 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  /** Unanswered `/new` confirmations, keyed by chat JID. */
+  private pendingResets = new Map<string, PendingReset>();
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
@@ -204,17 +305,130 @@ export class TelegramChannel implements Channel {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
     });
 
-    // Command to reset conversation — clears session so next message starts fresh
-    this.bot.command('new', (ctx) => {
+    // Command to reset conversation — deletion is irreversible, so summarize
+    // what goes and wait for an explicit yes.
+    this.bot.command('new', async (ctx) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) {
-        ctx.reply('This chat is not registered.');
+        await ctx.reply('This chat is not registered.');
         return;
       }
-      this.opts.onResetSession(group.folder);
-      logger.info({ chatJid, group: group.name }, 'Session reset via /new');
-      ctx.reply('Session cleared. Next message starts a fresh conversation.');
+
+      const preview = this.opts.onPreviewReset(group.folder);
+      if (preview.empty) {
+        await ctx.reply(formatResetPreview(preview));
+        return;
+      }
+
+      const senderId = ctx.from?.id;
+      if (senderId === undefined) {
+        await ctx.reply("Couldn't identify who sent that — try again.");
+        return;
+      }
+
+      this.pendingResets.set(chatJid, {
+        groupFolder: group.folder,
+        senderId,
+        expiresAt: Date.now() + RESET_CONFIRM_TTL_MS,
+      });
+
+      await ctx.reply(formatResetPreview(preview), {
+        reply_markup: new InlineKeyboard()
+          .text('Yes, clear it', 'new:yes')
+          .text('Cancel', 'new:no')
+          .row()
+          .text('List files', 'new:list'),
+      });
+    });
+
+    // Answer to the /new confirmation above.
+    this.bot.on('callback_query:data', async (ctx) => {
+      const data = ctx.callbackQuery.data;
+      if (data !== 'new:yes' && data !== 'new:no' && data !== 'new:list') {
+        return;
+      }
+
+      const chatJid = `tg:${ctx.chat?.id}`;
+
+      // A throw anywhere below would otherwise surface as a button that does
+      // nothing — always leave the user with an answer.
+      try {
+        const pending = this.pendingResets.get(chatJid);
+
+        if (!pending || Date.now() > pending.expiresAt) {
+          this.pendingResets.delete(chatJid);
+          await safeAnswer(ctx, 'That prompt expired.');
+          await editOrReply(
+            ctx,
+            'Reset prompt expired — nothing was deleted.',
+          );
+          return;
+        }
+
+        // Anyone can tap a button in a group chat; only the asker decides.
+        if (ctx.from.id !== pending.senderId) {
+          await safeAnswer(
+            ctx,
+            'Only whoever ran /new can answer this.',
+            true,
+          );
+          return;
+        }
+
+        // Expand the summary into per-file paths. The decision is still
+        // pending, so keep the entry alive and leave Yes/Cancel on the message.
+        if (data === 'new:list') {
+          const listed = this.opts.onPreviewReset(pending.groupFolder);
+          await safeAnswer(ctx);
+          await editOrReply(ctx, formatResetFileList(listed), {
+            reply_markup: new InlineKeyboard()
+              .text('Yes, clear it', 'new:yes')
+              .text('Cancel', 'new:no'),
+          });
+          return;
+        }
+
+        this.pendingResets.delete(chatJid);
+
+        if (data === 'new:no') {
+          await safeAnswer(ctx, 'Cancelled.');
+          await editOrReply(ctx, 'Cancelled — nothing was deleted.');
+          return;
+        }
+
+        // Re-read now: the container has been running since the prompt was
+        // shown, so report what actually goes rather than the stale preview.
+        const preview = this.opts.onPreviewReset(pending.groupFolder);
+        this.opts.onResetSession(pending.groupFolder);
+        logger.info(
+          {
+            chatJid,
+            group: pending.groupFolder,
+            files: preview.files,
+            bytes: preview.bytes,
+          },
+          'Session reset via /new (confirmed)',
+        );
+        // Deletion already happened — the confirmation text is cosmetic, so a
+        // failure here must not read as "the reset failed".
+        await safeAnswer(ctx, 'Cleared.');
+        await editOrReply(
+          ctx,
+          `Cleared ${preview.files} file${preview.files === 1 ? '' : 's'} ` +
+            `(${formatBytes(preview.bytes)}). Next message starts a fresh conversation.`,
+        );
+      } catch (err) {
+        logger.error(
+          { ...describeTelegramError(err), chatJid, data },
+          'Reset callback failed',
+        );
+        await safeAnswer(
+          ctx,
+          'Something went wrong handling that — check the logs.',
+          true,
+        );
+      }
     });
 
     // Telegram bot commands handled above — skip them in the general handler
@@ -455,7 +669,14 @@ export class TelegramChannel implements Channel {
 
     // Handle errors gracefully
     this.bot.catch((err) => {
-      logger.error({ err: err.message }, 'Telegram bot error');
+      logger.error(
+        {
+          ...describeTelegramError(err.error),
+          update: err.ctx?.update?.update_id,
+          stack: err.stack,
+        },
+        'Telegram bot error',
+      );
     });
 
     // Start polling — returns a Promise that resolves when started

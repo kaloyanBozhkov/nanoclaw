@@ -80,6 +80,34 @@ vi.mock('grammy', () => ({
   InputFile: class MockInputFile {
     constructor(public path: string) {}
   },
+  InlineKeyboard: class MockInlineKeyboard {
+    buttons: { label: string; data: string }[] = [];
+    text(label: string, data: string) {
+      this.buttons.push({ label, data });
+      return this;
+    }
+    row() {
+      return this;
+    }
+  },
+  GrammyError: class MockGrammyError extends Error {
+    constructor(
+      message: string,
+      public method = '',
+      public error_code = 0,
+      public description = '',
+    ) {
+      super(message);
+    }
+  },
+  HttpError: class MockHttpError extends Error {
+    constructor(
+      message: string,
+      public error: unknown = null,
+    ) {
+      super(message);
+    }
+  },
 }));
 
 import { TelegramChannel, TelegramChannelOpts } from './telegram.js';
@@ -93,6 +121,12 @@ function createTestOpts(
     onMessage: vi.fn(),
     onChatMetadata: vi.fn(),
     onResetSession: vi.fn(),
+    onPreviewReset: vi.fn(() => ({
+      targets: [],
+      files: 0,
+      bytes: 0,
+      empty: true,
+    })),
     registeredGroups: vi.fn(() => ({
       'tg:100200300': {
         name: 'Test Group',
@@ -191,7 +225,206 @@ async function triggerMediaMessage(
   for (const h of handlers) await h(ctx);
 }
 
+// --- /new confirmation helpers ---
+
+function nonEmptyPreview(files = 2, bytes = 32768) {
+  return {
+    targets: [
+      {
+        label: 'conversation history',
+        paths: ['/abs/a.jsonl'],
+        entries: [
+          { path: '/abs/a.jsonl', display: 'data/a.jsonl', bytes },
+        ],
+        files,
+        bytes,
+      },
+    ],
+    files,
+    bytes,
+    empty: false,
+  };
+}
+
+function createNewCommandCtx(chatId = 100200300, fromId = 7) {
+  return {
+    chat: { id: chatId, type: 'group' },
+    from: { id: fromId },
+    reply: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+function createCallbackCtx(
+  data: string,
+  { chatId = 100200300, fromId = 7, editFails = false } = {},
+) {
+  return {
+    callbackQuery: { data },
+    chat: { id: chatId },
+    from: { id: fromId },
+    answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+    editMessageText: editFails
+      ? vi.fn().mockRejectedValue(new Error('400: MESSAGE_TOO_LONG'))
+      : vi.fn().mockResolvedValue(undefined),
+    reply: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+async function runNewCommand(ctx: ReturnType<typeof createNewCommandCtx>) {
+  await currentBot().commandHandlers.get('new')!(ctx);
+}
+
+async function runCallback(ctx: ReturnType<typeof createCallbackCtx>) {
+  const handlers = currentBot().filterHandlers.get('callback_query:data') || [];
+  for (const h of handlers) await h(ctx);
+}
+
 // --- Tests ---
+
+describe('TelegramChannel /new confirmation', () => {
+  let channel: TelegramChannel;
+  let opts: TelegramChannelOpts;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    opts = createTestOpts({
+      onPreviewReset: vi.fn(() => nonEmptyPreview()),
+    });
+    channel = new TelegramChannel('token', opts);
+    await channel.connect();
+  });
+
+  it('asks before deleting instead of clearing immediately', async () => {
+    const ctx = createNewCommandCtx();
+    await runNewCommand(ctx);
+
+    expect(opts.onResetSession).not.toHaveBeenCalled();
+    const [text, extra] = ctx.reply.mock.calls[0];
+    expect(text).toContain('permanently delete');
+    expect(extra.reply_markup.buttons.map((b: any) => b.data)).toEqual([
+      'new:yes',
+      'new:no',
+      'new:list',
+    ]);
+  });
+
+  it('clears only after an explicit yes', async () => {
+    await runNewCommand(createNewCommandCtx());
+    const ctx = createCallbackCtx('new:yes');
+    await runCallback(ctx);
+
+    expect(opts.onResetSession).toHaveBeenCalledWith('test-group');
+    expect(ctx.editMessageText.mock.calls[0][0]).toContain('Cleared');
+  });
+
+  it('deletes nothing on cancel', async () => {
+    await runNewCommand(createNewCommandCtx());
+    const ctx = createCallbackCtx('new:no');
+    await runCallback(ctx);
+
+    expect(opts.onResetSession).not.toHaveBeenCalled();
+    expect(ctx.editMessageText.mock.calls[0][0]).toContain('nothing was deleted');
+  });
+
+  it('expands the file list without deciding, keeping yes/cancel', async () => {
+    await runNewCommand(createNewCommandCtx());
+    const ctx = createCallbackCtx('new:list');
+    await runCallback(ctx);
+
+    expect(opts.onResetSession).not.toHaveBeenCalled();
+    expect(ctx.editMessageText.mock.calls[0][0]).toContain('data/a.jsonl');
+    expect(
+      ctx.editMessageText.mock.calls[0][1].reply_markup.buttons.map(
+        (b: any) => b.data,
+      ),
+    ).toEqual(['new:yes', 'new:no']);
+
+    // Still answerable afterwards.
+    const yes = createCallbackCtx('new:yes');
+    await runCallback(yes);
+    expect(opts.onResetSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets only the asker answer', async () => {
+    await runNewCommand(createNewCommandCtx(100200300, 7));
+    const ctx = createCallbackCtx('new:yes', { fromId: 999 });
+    await runCallback(ctx);
+
+    expect(opts.onResetSession).not.toHaveBeenCalled();
+    expect(ctx.answerCallbackQuery.mock.calls[0][0].text).toContain(
+      'Only whoever ran /new',
+    );
+  });
+
+  it('refuses a stale confirmation', async () => {
+    await runNewCommand(createNewCommandCtx());
+    const later = Date.now() + 3 * 60 * 1000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(later);
+    const ctx = createCallbackCtx('new:yes');
+    await runCallback(ctx);
+    nowSpy.mockRestore();
+
+    expect(opts.onResetSession).not.toHaveBeenCalled();
+    expect(ctx.editMessageText.mock.calls[0][0]).toContain('expired');
+  });
+
+  it('says nothing-to-do without buttons when already fresh', async () => {
+    (opts.onPreviewReset as any).mockReturnValue({
+      targets: [],
+      files: 0,
+      bytes: 0,
+      empty: true,
+    });
+    const ctx = createNewCommandCtx();
+    await runNewCommand(ctx);
+
+    expect(ctx.reply.mock.calls[0][1]).toBeUndefined();
+    expect(opts.onResetSession).not.toHaveBeenCalled();
+  });
+
+  // Regression: a rejected editMessageText once surfaced as a button that did
+  // nothing at all (400 MESSAGE_TOO_LONG, swallowed by bot.catch).
+  it('falls back to a reply when the edit is rejected, never silently', async () => {
+    await runNewCommand(createNewCommandCtx());
+    const ctx = createCallbackCtx('new:list', { editFails: true });
+    await runCallback(ctx);
+
+    expect(ctx.editMessageText).toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0][0]).toContain('data/a.jsonl');
+  });
+
+  it('still reports success when the post-delete edit fails', async () => {
+    await runNewCommand(createNewCommandCtx());
+    const ctx = createCallbackCtx('new:yes', { editFails: true });
+    await runCallback(ctx);
+
+    expect(opts.onResetSession).toHaveBeenCalledTimes(1);
+    expect(ctx.reply.mock.calls[0][0]).toContain('Cleared');
+  });
+
+  it('answers with an alert when the handler throws outright', async () => {
+    await runNewCommand(createNewCommandCtx());
+    (opts.onPreviewReset as any).mockImplementation(() => {
+      throw new Error('disk exploded');
+    });
+    const ctx = createCallbackCtx('new:yes');
+    await runCallback(ctx);
+
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ show_alert: true }),
+    );
+  });
+
+  it('ignores callback data it does not own', async () => {
+    await runNewCommand(createNewCommandCtx());
+    const ctx = createCallbackCtx('someother:thing');
+    await runCallback(ctx);
+
+    expect(ctx.answerCallbackQuery).not.toHaveBeenCalled();
+    expect(opts.onResetSession).not.toHaveBeenCalled();
+  });
+});
 
 describe('TelegramChannel', () => {
   beforeEach(() => {
@@ -1081,7 +1314,10 @@ describe('TelegramChannel', () => {
     it('throws over the 50MB upload limit', async () => {
       const channel = await connectedChannel();
       await expect(
-        channel.sendMedia('tg:100200300', fixture('huge.mp4', 51 * 1024 * 1024)),
+        channel.sendMedia(
+          'tg:100200300',
+          fixture('huge.mp4', 51 * 1024 * 1024),
+        ),
       ).rejects.toThrow(/50MB/);
     });
 

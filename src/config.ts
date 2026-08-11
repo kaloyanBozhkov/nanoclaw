@@ -54,6 +54,12 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
+// Directories inside a group folder holding derived, re-fetchable data.
+// `/new` wipes these so a fresh session can't inherit a stale copy; anything
+// an agent authored (design-briefs/, memory) is durable and stays put.
+// `design-cache/` mirrors a Claude Design project and re-pulls on demand.
+export const EPHEMERAL_GROUP_DIRS = ['design-cache'] as const;
+
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE ||
   envConfig.CONTAINER_IMAGE ||
@@ -109,9 +115,7 @@ export const TIMEZONE =
 // Model the container agent runs on. Override via ANTHROPIC_MODEL in .env;
 // defaults to the latest Claude Fable. Passed to the SDK as a container env var.
 export const AGENT_MODEL =
-  process.env.ANTHROPIC_MODEL ||
-  envConfig.ANTHROPIC_MODEL ||
-  'claude-fable-5';
+  process.env.ANTHROPIC_MODEL || envConfig.ANTHROPIC_MODEL || 'claude-fable-5';
 
 // Sender IDs treated as the owner for privileged chat commands (e.g. switching
 // the model). Comma-separated in OWNER_IDS. For Telegram this is the numeric
@@ -140,7 +144,11 @@ export interface ModelChoice {
 
 export const AVAILABLE_MODELS: ModelChoice[] = [
   { alias: 'opus', id: 'claude-opus-4-8', label: 'Opus 4.8' },
-  { alias: 'opus-1m', id: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M context)' },
+  {
+    alias: 'opus-1m',
+    id: 'claude-opus-4-8[1m]',
+    label: 'Opus 4.8 (1M context)',
+  },
   { alias: 'fable', id: 'claude-fable-5', label: 'Fable 5' },
   { alias: 'sonnet', id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
   { alias: 'haiku', id: 'claude-haiku-4-5', label: 'Haiku 4.5' },

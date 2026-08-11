@@ -9,6 +9,7 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  EPHEMERAL_GROUP_DIRS,
   IDLE_TIMEOUT,
   isOwnerSender,
   modelLabel,
@@ -54,6 +55,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { collectResetTargets, previewReset } from './session-reset.js';
 import { addPin, formatPinList, listPins, removePin } from './pinned.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
@@ -945,8 +947,7 @@ async function main(): Promise<void> {
     if (!channel) return;
     const active = currentModelId(chatJid);
     const lines = AVAILABLE_MODELS.map(
-      (m, i) =>
-        `${i + 1}. ${m.label}${m.id === active ? '  ← current' : ''}`,
+      (m, i) => `${i + 1}. ${m.label}${m.id === active ? '  ← current' : ''}`,
     );
     await channel.sendMessage(
       chatJid,
@@ -986,9 +987,9 @@ async function main(): Promise<void> {
 
     const choice = resolveModelChoice(arg);
     if (!choice) {
-      const list = AVAILABLE_MODELS.map(
-        (m, i) => `${i + 1}. ${m.label}`,
-      ).join('\n');
+      const list = AVAILABLE_MODELS.map((m, i) => `${i + 1}. ${m.label}`).join(
+        '\n',
+      );
       await channel.sendMessage(
         chatJid,
         `⚠️ Unknown model "${arg}". Pick one:\n${list}`,
@@ -1206,36 +1207,28 @@ async function main(): Promise<void> {
         }
       }
 
-      // Delete Claude session files so the next container starts completely fresh.
-      // Only remove session entries (UUID dirs/files), preserve memory/.
-      // container-runner.ts recreates .claude/ with settings.json on next run.
-      const projectsDir = path.join(
-        DATA_DIR,
-        'sessions',
-        groupFolder,
-        '.claude',
-        'projects',
-      );
-      try {
-        if (fs.existsSync(projectsDir)) {
-          for (const projectDir of fs.readdirSync(projectsDir)) {
-            const fullProjectDir = path.join(projectsDir, projectDir);
-            if (!fs.statSync(fullProjectDir).isDirectory()) continue;
-            for (const entry of fs.readdirSync(fullProjectDir)) {
-              if (entry === 'memory') continue; // preserve auto-memory
-              const entryPath = path.join(fullProjectDir, entry);
-              fs.rmSync(entryPath, { recursive: true, force: true });
-            }
+      // Delete exactly what `/new`'s confirmation prompt described — the target
+      // list comes from the same collector the preview used, so the two can't
+      // drift. Claude session files (UUID dirs/files, never memory/) plus any
+      // derived group caches; container-runner.ts recreates .claude/ next run.
+      for (const target of collectResetTargets(groupFolder)) {
+        for (const p of target.paths) {
+          try {
+            fs.rmSync(p, { recursive: true, force: true });
+          } catch (err) {
+            logger.warn(
+              { groupFolder, target: target.label, path: p, err },
+              'Failed to clear reset target',
+            );
           }
-          logger.info({ groupFolder }, 'Claude session files cleared via /new');
         }
-      } catch (err) {
-        logger.warn(
-          { groupFolder, err },
-          'Failed to clear Claude session files',
+        logger.info(
+          { groupFolder, target: target.label, files: target.files },
+          'Cleared reset target via /new',
         );
       }
     },
+    onPreviewReset: (groupFolder: string) => previewReset(groupFolder),
     registeredGroups: () => registeredGroups,
   };
 

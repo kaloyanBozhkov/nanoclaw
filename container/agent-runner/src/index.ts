@@ -628,6 +628,7 @@ async function runQuery(
           'mcp__playwright__*',
           'mcp__pencil__*',
           'mcp__notion__*',
+          'mcp__design__*',
         ],
         // Notion's hosted MCP server (v1.2.0, 2026-08) serves this tool with a
         // top-level `anyOf` in its input schema, which the Anthropic API
@@ -664,6 +665,22 @@ async function runQuery(
                   type: 'http',
                   url: process.env.PENCIL_MCP_URL,
                 } as any,
+              }
+            : {}),
+          // Claude Design lives on api.anthropic.com, which ANTHROPIC_BASE_URL
+          // already points at the host credential proxy — so the placeholder
+          // Authorization below is swapped for the real OAuth token on the way
+          // out and no credential ever enters the container. Requires the
+          // account to have granted the `agent_design_projects` consent at
+          // claude.ai/design/settings; without it every call returns
+          // {"error":"needs_consent"}.
+          ...(process.env.ANTHROPIC_BASE_URL
+            ? {
+                design: {
+                  type: 'http' as const,
+                  url: `${process.env.ANTHROPIC_BASE_URL.replace(/\/$/, '')}/v1/design/mcp`,
+                  headers: { Authorization: 'Bearer placeholder' },
+                },
               }
             : {}),
           ...(notionAccessToken
