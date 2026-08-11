@@ -25,6 +25,10 @@ interface GroupState {
   containerName: string | null;
   groupFolder: string | null;
   retryCount: number;
+  // Reschedules the active container's hard runtime cap (null = no cap).
+  // Registered by the container runner while a container is live; cleared
+  // when it exits. Drives live-apply of the nosleep/yessleep chat commands.
+  rescheduleHardTimer: ((capMs: number | null) => void) | null;
 }
 
 export class GroupQueue {
@@ -49,6 +53,7 @@ export class GroupQueue {
         containerName: null,
         groupFolder: null,
         retryCount: 0,
+        rescheduleHardTimer: null,
       };
       this.groups.set(groupJid, state);
     }
@@ -142,6 +147,30 @@ export class GroupQueue {
   }
 
   /**
+   * Register the active container's hard-cap reschedule function. Called by the
+   * container runner while a container is live so nosleep/yessleep can adjust
+   * the cap on the running container.
+   */
+  registerHardTimer(
+    groupJid: string,
+    reschedule: (capMs: number | null) => void,
+  ): void {
+    this.getGroup(groupJid).rescheduleHardTimer = reschedule;
+  }
+
+  /**
+   * Live-apply a new hard runtime cap to the currently-running container for a
+   * group (null = no cap). Returns true if a container was running to adjust.
+   * Persisting the setting for future runs is the caller's responsibility.
+   */
+  rescheduleHardTimer(groupJid: string, capMs: number | null): boolean {
+    const state = this.groups.get(groupJid);
+    if (!state?.active || !state.rescheduleHardTimer) return false;
+    state.rescheduleHardTimer(capMs);
+    return true;
+  }
+
+  /**
    * Return the active container's process + name for a group, or null if
    * nothing is running. Used by the /stop handler to issue a hard kill.
    */
@@ -204,6 +233,30 @@ export class GroupQueue {
   }
 
   /**
+   * Signal the active container to switch models mid-run via an IPC file.
+   * The agent-runner calls query.setModel() so the change takes effect on the
+   * next turn — no respawn needed. Returns true if written to a live container.
+   */
+  sendModelSwitch(groupJid: string, model: string): boolean {
+    const state = this.getGroup(groupJid);
+    if (!state.active || !state.groupFolder || state.isTaskContainer)
+      return false;
+
+    const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+    try {
+      fs.mkdirSync(inputDir, { recursive: true });
+      const filename = `${Date.now()}-setmodel.json`;
+      const filepath = path.join(inputDir, filename);
+      const tempPath = `${filepath}.tmp`;
+      fs.writeFileSync(tempPath, JSON.stringify({ type: 'setmodel', model }));
+      fs.renameSync(tempPath, filepath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Signal the active container to wind down by writing a close sentinel.
    */
   closeStdin(groupJid: string): void {
@@ -252,6 +305,7 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      state.rescheduleHardTimer = null;
       this.activeCount--;
       this.drainGroup(groupJid);
     }
@@ -281,6 +335,7 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      state.rescheduleHardTimer = null;
       this.activeCount--;
       this.drainGroup(groupJid);
     }

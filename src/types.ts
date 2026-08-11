@@ -29,8 +29,22 @@ export interface AllowedRoot {
 
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
-  timeout?: number; // Default: 300000 (5 minutes)
+  timeout?: number; // Hard-cap runtime in ms. Falls back to CONTAINER_TIMEOUT.
   enableNotion?: boolean;
+  // Per-group model override (set via /model). Falls back to AGENT_MODEL.
+  // Must be one of AVAILABLE_MODELS' ids.
+  model?: string;
+  // When true, the container has NO hard runtime cap ("nosleep" via chat).
+  // Only the idle timeout can reap it. Set false / cleared by "yessleep".
+  noSleep?: boolean;
+  // Extra project-relative paths to isolate between host and container, on top
+  // of the always-isolated ISOLATED_ARTIFACTS (node_modules, .next). Use for
+  // generated output that holds platform-specific binaries but lives outside
+  // node_modules — e.g. a Prisma client emitted to `packages/prisma/client`,
+  // which otherwise overwrites the host's darwin query engine with a linux one.
+  // Paths are relative to each mounted project root; `..` and absolute paths
+  // are rejected.
+  isolatedArtifacts?: string[];
 }
 
 export interface RegisteredGroup {
@@ -82,6 +96,20 @@ export interface TaskRunLog {
 
 // --- Channel abstraction ---
 
+/**
+ * How a channel should present an outbound file.
+ * 'auto'     — pick the richest inline presentation the file's type allows.
+ * 'document' — send the raw bytes untouched. Required when re-encoding would
+ *              destroy something the user cares about (e.g. a GIF's alpha
+ *              channel, which is lost the moment Telegram transcodes to MP4).
+ */
+export type MediaMode = 'auto' | 'document';
+
+export interface SendMediaOptions {
+  caption?: string;
+  as?: MediaMode;
+}
+
 export interface Channel {
   name: string;
   connect(): Promise<void>;
@@ -89,7 +117,15 @@ export interface Channel {
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
-  // Optional: send a photo/image. Channels that support it implement it.
+  // Optional: send any file type. Preferred over sendPhoto — channels
+  // implementing this can send video, audio, documents and animations.
+  sendMedia?(
+    jid: string,
+    filePath: string,
+    options?: SendMediaOptions,
+  ): Promise<void>;
+  // Optional: send a photo/image. Legacy — channels that only do images
+  // implement this, and the host falls back to it when sendMedia is absent.
   sendPhoto?(jid: string, filePath: string, caption?: string): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;

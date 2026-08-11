@@ -33,8 +33,23 @@ RUN apt-get update && apt-get install -y \
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install pnpm and global tools
-RUN npm install -g pnpm agent-browser @anthropic-ai/claude-code @upstash/context7-mcp@latest @playwright/mcp@latest @playwright/test@latest vercel
+# Package managers + global tools.
+# corepack routes pnpm/yarn invocations to each repo's pinned `packageManager`
+# version; `corepack install -g` bakes the fallback versions used when a repo
+# pins nothing. The pnpm fallback stays on the 10.x line on purpose: pnpm 11
+# moved settings out of .npmrc / npm_config_* env, so an unpinned pnpm 11
+# silently ignores a repo's node-linker and this project's store-dir /
+# verify-deps-before-run settings — match what developers run locally instead.
+# COREPACK_HOME is world-writable so the non-root runtime user can fetch
+# repo-pinned versions on demand. bun is installed for bun-based repos (not
+# corepack-managed).
+ENV COREPACK_HOME=/opt/corepack \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    COREPACK_DEFAULT_TO_LATEST=0
+RUN npm install -g bun agent-browser @anthropic-ai/claude-code @upstash/context7-mcp@latest @playwright/mcp@latest @playwright/test@latest vercel \
+ && corepack enable \
+ && corepack install -g pnpm@10.22.0 yarn@1.22.22 \
+ && chmod -R a+rwX /opt/corepack
 RUN npx playwright install --with-deps chromium
 
 # Create app directory

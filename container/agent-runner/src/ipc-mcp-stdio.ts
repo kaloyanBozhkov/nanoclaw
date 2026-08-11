@@ -62,53 +62,89 @@ server.tool(
   },
 );
 
-server.tool(
-  'send_image',
-  `Send an image/photo to the user or group. Supports PNG, JPG, WEBP, and GIF.
-
-The file MUST be under a host-visible path, because the host reads the same file from its end of the bind mount to upload it:
+const HOST_VISIBLE_PATHS = `The file MUST be under a host-visible path, because the host reads the same file from its end of the bind mount to upload it:
 • /workspace/group/<name>           — per-group folder, persisted across runs
 • /workspace/extra/<mount>/<name>   — any bind-mounted project folder from containerConfig
 
 Paths under /tmp, /home/node, /app, or anywhere else inside the container are NOT visible to the host and will be rejected.
 
-If a screenshot lives outside the allowed paths (e.g. /tmp/screenshot.png), copy it first:
-\`cp /tmp/screenshot.png /workspace/group/screenshot.png\` and then call send_image with the new path.`,
+If a file lives outside the allowed paths (e.g. /tmp/screenshot.png), copy it first:
+\`cp /tmp/screenshot.png /workspace/group/screenshot.png\` and then call the tool with the new path.`;
+
+/** Shared validation + IPC write for both send_image and send_file. */
+function queueMedia(
+  filePath: string,
+  caption: string | undefined,
+  as: 'auto' | 'document',
+  label: string,
+) {
+  const hostVisible =
+    filePath.startsWith('/workspace/group/') ||
+    filePath.startsWith('/workspace/extra/');
+  if (!hostVisible) {
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Error: ${filePath} is only visible inside the container — the host can't read it, so the file would never reach the user. Copy it to /workspace/group/ (or an existing /workspace/extra/<mount>/ path) and call the tool with the new path.`,
+        },
+      ],
+    };
+  }
+  if (!fs.existsSync(filePath)) {
+    return { content: [{ type: 'text' as const, text: `Error: file not found at ${filePath}` }] };
+  }
+
+  const data: Record<string, string | undefined> = {
+    type: 'media',
+    chatJid,
+    filePath,
+    caption: caption || undefined,
+    as,
+    groupFolder,
+    timestamp: new Date().toISOString(),
+  };
+
+  writeIpcFile(MESSAGES_DIR, data);
+
+  return { content: [{ type: 'text' as const, text: `${label} queued for sending.` }] };
+}
+
+server.tool(
+  'send_image',
+  `Send a still image to the user or group. Accepts PNG, JPG, and WEBP.
+
+For GIFs, video, audio, PDFs, archives, or any other file type, use send_file instead — this tool sends stills only.
+
+${HOST_VISIBLE_PATHS}`,
   {
     file_path: z.string().describe('Absolute path to the image file, under /workspace/group/ or /workspace/extra/<mount>/ (e.g. /workspace/group/screenshot.png).'),
     caption: z.string().optional().describe('Optional caption/description to send with the image (supports Markdown)'),
   },
-  async (args) => {
-    const p = args.file_path;
-    const hostVisible =
-      p.startsWith('/workspace/group/') || p.startsWith('/workspace/extra/');
-    if (!hostVisible) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: `Error: ${p} is only visible inside the container — the host can't read it, so the image would never reach the user. Copy it to /workspace/group/ (or an existing /workspace/extra/<mount>/ path) and call send_image with the new path.`,
-          },
-        ],
-      };
-    }
-    if (!fs.existsSync(p)) {
-      return { content: [{ type: 'text' as const, text: `Error: file not found at ${p}` }] };
-    }
+  async (args) => queueMedia(args.file_path, args.caption, 'auto', 'Image'),
+);
 
-    const data: Record<string, string | undefined> = {
-      type: 'image',
-      chatJid,
-      filePath: p,
-      caption: args.caption || undefined,
-      groupFolder,
-      timestamp: new Date().toISOString(),
-    };
+server.tool(
+  'send_file',
+  `Send ANY file type to the user or group — video, GIF, audio, PDF, archive, or an image. Anything the chat platform accepts.
 
-    writeIpcFile(MESSAGES_DIR, data);
+The file is delivered inline where the platform supports it (a GIF animates, an MP4 plays, an MP3 shows a player) and as a downloadable file otherwise.
 
-    return { content: [{ type: 'text' as const, text: 'Image sent.' }] };
+IMPORTANT — re-encoding destroys some files. Chat platforms transcode inline media: a GIF becomes MP4, and MP4 has NO ALPHA CHANNEL, so a transparent GIF loses its transparency and gains a solid background. Sending a still image re-encodes it and can soften fine detail.
+Pass \`as: "document"\` to send the exact bytes untouched, so the user can download the real file. Use it whenever the file's value is in its precise content rather than a quick preview — transparency, lossless quality, or a file they need to open in another tool. If in doubt for a transparent or alpha-channel asset, use \`as: "document"\`, or send both.
+
+Max 50MB.
+
+${HOST_VISIBLE_PATHS}`,
+  {
+    file_path: z.string().describe('Absolute path to the file, under /workspace/group/ or /workspace/extra/<mount>/ (e.g. /workspace/group/clip.mp4).'),
+    caption: z.string().optional().describe('Optional caption/description to send with the file (supports Markdown)'),
+    as: z
+      .enum(['auto', 'document'])
+      .optional()
+      .describe('"auto" (default) previews inline, re-encoding as the platform sees fit. "document" sends the exact bytes with no re-encoding — use for transparency/alpha, lossless quality, or files meant to be downloaded and opened elsewhere.'),
   },
+  async (args) => queueMedia(args.file_path, args.caption, args.as === 'document' ? 'document' : 'auto', 'File'),
 );
 
 server.tool(

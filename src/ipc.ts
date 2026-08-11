@@ -10,7 +10,7 @@ import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { handleOpenHost } from './open-host.js';
-import { RegisteredGroup } from './types.js';
+import { RegisteredGroup, SendMediaOptions } from './types.js';
 
 /**
  * Translate a /workspace/extra/<mount>/<rest> container path to its host-side
@@ -49,7 +49,11 @@ function resolveExtraMountPath(
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
-  sendPhoto: (jid: string, filePath: string, caption?: string) => Promise<void>;
+  sendMedia: (
+    jid: string,
+    filePath: string,
+    options?: SendMediaOptions,
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -130,7 +134,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 } else if (data.type === 'message' && data.text) {
                   await deps.sendMessage(chatJid, data.text);
                   logger.info({ chatJid, sourceGroup }, 'IPC message sent');
-                } else if (data.type === 'image' && data.filePath) {
+                } else if (
+                  (data.type === 'media' || data.type === 'image') &&
+                  data.filePath
+                ) {
                   // Translate container path to host path. Two cases:
                   // 1. /workspace/group/ → groups/{sourceGroup}/ (always bind-mounted)
                   // 2. /workspace/extra/<mount>/ → reverse-lookup via additionalMounts
@@ -153,13 +160,16 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   if (!fs.existsSync(hostPath)) {
                     logger.warn(
                       { chatJid, containerPath, hostPath, sourceGroup },
-                      'IPC image file not found',
+                      'IPC media file not found',
                     );
                   } else {
-                    await deps.sendPhoto(chatJid, hostPath, data.caption);
+                    await deps.sendMedia(chatJid, hostPath, {
+                      caption: data.caption,
+                      as: data.as === 'document' ? 'document' : 'auto',
+                    });
                     logger.info(
                       { chatJid, hostPath, sourceGroup },
-                      'IPC image sent',
+                      'IPC media sent',
                     );
                   }
                 }

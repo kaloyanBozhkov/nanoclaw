@@ -9,6 +9,7 @@ import path from 'path';
 
 import { readEnvFile } from './env.js';
 import {
+  AGENT_MODEL,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -56,7 +57,7 @@ export interface ContainerOutput {
   heartbeat?: boolean;
 }
 
-interface VolumeMount {
+export interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
@@ -150,6 +151,7 @@ function buildVolumeMounts(
     '.claude',
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
+
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   const desiredSettings = {
     env: {
@@ -260,14 +262,208 @@ function buildVolumeMounts(
   return mounts;
 }
 
+// ---------------------------------------------------------------------------
+// Container-side build artifacts (node_modules, .next, pnpm store)
+//
+// The container never shares these with the host: macOS and Linux need
+// different native binaries, so each side owns a full tree materialized from
+// the same lockfile. The bind-mounted lockfile (plain text) is the sync point,
+// exactly as between two developers on different OSes — a container-side
+// install updates package.json/pnpm-lock.yaml in the real repo (reviewable in
+// git) while its binaries stay in the container's own tree.
+//
+// The Linux trees live in one named Docker volume (native ext4 inside the VM),
+// mounted over each project's artifact paths via volume subpaths. Compared to
+// the bind-mounted shadow directories this replaces, installs run at native
+// filesystem speed instead of crossing VirtioFS — which is what turns a
+// "lockfile changed, re-link" self-heal from minutes into seconds.
+// ---------------------------------------------------------------------------
+
+/** Named volume holding every container-side artifact tree + package caches. */
+export const ARTIFACTS_VOLUME = 'nanoclaw-artifacts';
+
+/** Where the shared pnpm store is mounted inside every container. */
+export const PNPM_STORE_PATH = '/home/node/.pnpm-store';
+
+export interface ArtifactMount {
+  /** Path inside ARTIFACTS_VOLUME (POSIX, relative). */
+  subpath: string;
+  /** Absolute path inside the container to mount it over. */
+  containerPath: string;
+}
+
+// Volume-backed caches every container gets regardless of repo layout, so
+// package downloads survive across ephemeral containers.
+export const FIXED_ARTIFACT_MOUNTS: ArtifactMount[] = [
+  { subpath: 'pnpm-store', containerPath: PNPM_STORE_PATH },
+  { subpath: 'npm-cache', containerPath: '/home/node/.npm' },
+];
+
+// Per-project paths that must never be shared between host and container.
+// node_modules holds native binaries; .next is build output that only matches
+// the OS that produced it; .pnpm-store is pnpm's same-filesystem fallback
+// store — left unshadowed, a pnpm that ignores store-dir (pnpm 11 with
+// npm_config_* env) writes gigabytes of cache into the user's checkout.
+const ISOLATED_ARTIFACTS = ['node_modules', '.next', '.pnpm-store'];
+
+// Find every project root (dir with a package.json) under a mounted directory,
+// so each gets its own isolated artifacts. Skips node_modules/.next/hidden dirs.
+//
+// This does NOT stop at the first package.json it finds: a workspace monorepo
+// has a real node_modules in every package (and in non-workspace subprojects
+// like a nested admin SPA that installs itself), and any root we miss stays
+// bind-mounted from the host, where the container's linux install then lands.
+// Over-shadowing is cheap and safe — an empty node_modules doesn't shadow
+// module resolution, since Node keeps walking up when a lookup misses.
+export function findProjectRoots(root: string, maxDepth = 4): string[] {
+  const roots: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    if (entries.some((e) => e.isFile() && e.name === 'package.json')) {
+      roots.push(dir);
+    }
+    if (depth >= maxDepth) return;
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (e.name === 'node_modules' || e.name === '.next') continue;
+      if (e.name.startsWith('.')) continue;
+      walk(path.join(dir, e.name), depth + 1);
+    }
+  };
+  walk(root, 0);
+  return roots;
+}
+
+// Keep a configured extra artifact path inside its project (no absolute paths,
+// no `..` escapes) so a group's config can't shadow arbitrary host directories.
+function safeArtifactPath(rel: string): string | null {
+  if (!rel || path.posix.isAbsolute(rel) || path.isAbsolute(rel)) return null;
+  const normalized = path.posix.normalize(rel).replace(/\/+$/, '');
+  if (!normalized || normalized === '.' || normalized.split('/').includes('..'))
+    return null;
+  return normalized;
+}
+
+// Artifact mounts for one project root. Unconditional — the path is claimed
+// even when the host has no such directory yet, otherwise the container's
+// first install *creates* it in the user's checkout, which is the exact leak
+// this prevents.
+function projectArtifactMounts(
+  containerProjectDir: string,
+  storeKey: string,
+  extraArtifacts: string[] = [],
+): ArtifactMount[] {
+  const names = [...ISOLATED_ARTIFACTS];
+  for (const extra of extraArtifacts) {
+    const safe = safeArtifactPath(extra);
+    if (!safe) {
+      logger.warn(
+        { artifact: extra, storeKey },
+        'Ignoring unsafe isolatedArtifacts entry',
+      );
+      continue;
+    }
+    if (!names.includes(safe)) names.push(safe);
+  }
+  return names.map((name) => ({
+    subpath: `${storeKey}/${name}`,
+    containerPath: `${containerProjectDir}/${name}`,
+  }));
+}
+
+// The full artifact-mount set for a container: every project root under the
+// user's repos (/workspace/extra/*) and under the group folder gets its own
+// container-side artifacts, plus the fixed shared caches. Walking every
+// project root matters: a workspace monorepo has a real node_modules in every
+// package, and any root missed stays bind-mounted from the host, where the
+// container's Linux install would land.
+export function collectArtifactMounts(
+  mounts: VolumeMount[],
+  groupFolder: string,
+  extraArtifacts: string[] = [],
+): ArtifactMount[] {
+  const entries: ArtifactMount[] = [...FIXED_ARTIFACT_MOUNTS];
+  const safeGroup = groupFolder.replace(/[^a-zA-Z0-9-]/g, '-');
+  for (const mount of mounts) {
+    if (mount.readonly) continue;
+    const isExtra = mount.containerPath.startsWith('/workspace/extra/');
+    const isGroup = mount.containerPath === '/workspace/group';
+    if (!isExtra && !isGroup) continue;
+    for (const projectDir of findProjectRoots(mount.hostPath)) {
+      const rel = path.relative(mount.hostPath, projectDir);
+      const relPosix = rel.split(path.sep).join('/');
+      const containerProjectDir = relPosix
+        ? path.posix.join(mount.containerPath, relPosix)
+        : mount.containerPath;
+      const storeKey = isExtra
+        ? path.posix.join(
+            'extra',
+            safeGroup,
+            path.basename(mount.hostPath),
+            relPosix,
+          )
+        : path.posix.join('groups', safeGroup, relPosix);
+      entries.push(
+        ...projectArtifactMounts(
+          containerProjectDir,
+          storeKey,
+          // Configured extras are relative to the mounted repo root only.
+          isExtra && !rel ? extraArtifacts : [],
+        ),
+      );
+    }
+  }
+  return entries;
+}
+
+// Subpath mounts fail unless the directory already exists inside the volume,
+// and the runtime user must own it — so each new subpath gets a one-shot
+// mkdir+chown container before first use. Memoized per host process; mkdir -p
+// is idempotent, so a restart just re-runs it once.
+const ensuredSubpaths = new Set<string>();
+
+export async function ensureArtifactSubpaths(
+  entries: ArtifactMount[],
+): Promise<void> {
+  const pending = entries.filter((e) => !ensuredSubpaths.has(e.subpath));
+  if (pending.length === 0) return;
+
+  // Match the ownership the real container runs under (see buildContainerArgs):
+  // host uid when it isn't root/node, otherwise the image's node user.
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  const owner =
+    uid != null && uid !== 0 && uid !== 1000 ? `${uid}:${gid}` : '1000:1000';
+  const dirs = pending.map((e) => `'/artifacts/${e.subpath}'`).join(' ');
+  const script = `mkdir -p ${dirs} && chown ${owner} ${dirs}`;
+  // --user 0:0: the image defaults to the node user, which can't mkdir/chown
+  // in the root-owned volume top level.
+  const cmd = `${CONTAINER_RUNTIME_BIN} run --rm --user 0:0 -v ${ARTIFACTS_VOLUME}:/artifacts --entrypoint bash ${CONTAINER_IMAGE} -c ${JSON.stringify(script)}`;
+
+  await new Promise<void>((resolve, reject) => {
+    exec(cmd, { timeout: 60000 }, (err) => (err ? reject(err) : resolve()));
+  });
+  for (const e of pending) ensuredSubpaths.add(e.subpath);
+}
+
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  model: string,
+  artifactMounts: ArtifactMount[] = [],
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Model the SDK runs the agent on (read by @anthropic-ai/claude-agent-sdk).
+  args.push('-e', `ANTHROPIC_MODEL=${model}`);
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
@@ -331,6 +527,16 @@ function buildContainerArgs(
   // Pass Pencil MCP URL so container agents can connect to host Pencil MCP server
   args.push('-e', `PENCIL_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:3102/mcp`);
 
+  // pnpm 10+ can verify node_modules against the lockfile before `pnpm run`
+  // and install when they diverge. With the container's tree on a native-speed
+  // volume this IS the sync mechanism: deps change on the host, and the next
+  // script run re-links the container tree from the lockfile in seconds.
+  args.push('-e', 'npm_config_verify_deps_before_run=install');
+
+  // Keep pnpm's store on the shared artifacts volume, not its same-filesystem
+  // fallback (<repo>/.pnpm-store — inside the user's checkout).
+  args.push('-e', `npm_config_store_dir=${PNPM_STORE_PATH}`);
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 
@@ -349,32 +555,17 @@ function buildContainerArgs(
       args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
     } else {
       args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
-
-      // Shadow node_modules with a persistent host directory so container installs
-      // don't overwrite the host's architecture-specific binaries, but persist
-      // across container restarts to avoid re-installing every time.
-      const hostNodeModules = path.join(mount.hostPath, 'node_modules');
-      if (
-        fs.existsSync(hostNodeModules) &&
-        mount.containerPath.startsWith('/workspace/extra/')
-      ) {
-        const mountName = path.basename(mount.hostPath);
-        const groupFolder = containerName
-          .replace(/^nanoclaw-/, '')
-          .replace(/-\d+$/, '');
-        const agentNodeModules = path.join(
-          GROUPS_DIR,
-          groupFolder,
-          'node_modules',
-          mountName,
-        );
-        fs.mkdirSync(agentNodeModules, { recursive: true });
-        args.push(
-          '-v',
-          `${agentNodeModules}:${mount.containerPath}/node_modules`,
-        );
-      }
     }
+  }
+
+  // Container-side artifact trees (see collectArtifactMounts): volume subpaths
+  // mounted over every project's node_modules/.next/.pnpm-store so Linux
+  // binaries and caches never land in the user's checkout.
+  for (const m of artifactMounts) {
+    args.push(
+      '--mount',
+      `type=volume,src=${ARTIFACTS_VOLUME},dst=${m.containerPath},volume-subpath=${m.subpath}`,
+    );
   }
 
   args.push(CONTAINER_IMAGE);
@@ -387,6 +578,9 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  // Called once with a fn that reschedules this container's hard runtime cap.
+  // `capMs === null` removes the cap. Lets the host live-apply nosleep/yessleep.
+  onReschedule?: (reschedule: (capMs: number | null) => void) => void,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -396,7 +590,21 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  // Per-group model override (set via /model), falling back to the global default.
+  const model = group.containerConfig?.model || AGENT_MODEL;
+  const artifactMounts = collectArtifactMounts(
+    mounts,
+    group.folder,
+    group.containerConfig?.isolatedArtifacts ?? [],
+  );
+  // Volume subpaths must exist before the mounts can bind to them.
+  await ensureArtifactSubpaths(artifactMounts);
+  const containerArgs = buildContainerArgs(
+    mounts,
+    containerName,
+    model,
+    artifactMounts,
+  );
 
   logger.debug(
     {
@@ -522,10 +730,6 @@ export async function runContainerAgent(
 
     let timedOut = false;
     let hadStreamingOutput = false;
-    const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
-    // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
-    // graceful _close sentinel has time to trigger before the hard kill fires.
-    const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
 
     const killOnTimeout = () => {
       timedOut = true;
@@ -544,13 +748,38 @@ export async function runContainerAgent(
       });
     };
 
-    // Hard cap — never reset, never extended. If configTimeout is 30 min,
-    // the container is killed at 30 min from start regardless of activity.
-    // See comment in stdout handler above.
-    const timeout = setTimeout(killOnTimeout, timeoutMs);
+    // Hard cap on total runtime — never reset on activity (see comment in the
+    // stdout handler). It IS rescheduable at runtime via `onReschedule`, so the
+    // "nosleep"/"yessleep" chat commands can lift or restore the cap on a
+    // container that is already running. `capMs === null` means no hard cap at
+    // all; only the host idle timeout can then reap the container.
+    let hardTimer: ReturnType<typeof setTimeout> | null = null;
+    const rescheduleHardTimer = (capMs: number | null) => {
+      if (hardTimer) {
+        clearTimeout(hardTimer);
+        hardTimer = null;
+      }
+      if (capMs === null) {
+        logger.info(
+          { group: group.name, containerName },
+          'Hard runtime cap disabled (nosleep) — idle timeout still applies',
+        );
+        return;
+      }
+      // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
+      // graceful _close sentinel has time to trigger before the hard kill fires.
+      const ms = Math.max(capMs, IDLE_TIMEOUT + 30_000);
+      hardTimer = setTimeout(killOnTimeout, ms);
+    };
+
+    const initialCap = group.containerConfig?.noSleep
+      ? null
+      : group.containerConfig?.timeout || CONTAINER_TIMEOUT;
+    rescheduleHardTimer(initialCap);
+    onReschedule?.(rescheduleHardTimer);
 
     container.on('close', (code) => {
-      clearTimeout(timeout);
+      if (hardTimer) clearTimeout(hardTimer);
       const duration = Date.now() - startTime;
 
       if (timedOut) {
@@ -595,7 +824,7 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Container timed out after ${configTimeout}ms`,
+          error: `Container timed out after ${duration}ms`,
         });
         return;
       }
@@ -745,7 +974,7 @@ export async function runContainerAgent(
     });
 
     container.on('error', (err) => {
-      clearTimeout(timeout);
+      if (hardTimer) clearTimeout(hardTimer);
       logger.error(
         { group: group.name, containerName, error: err },
         'Container spawn error',

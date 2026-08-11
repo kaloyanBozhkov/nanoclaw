@@ -192,6 +192,24 @@ ESLint 9 with flat config (`eslint.config.js` at root):
 
 ## AI agent rules
 - never handle translations of locales. Just handle adding any english keys in the right json file.
+- **Dependencies:** this container has its own Linux `node_modules` (a Docker volume), materialized from the repo's `pnpm-lock.yaml`. Any `pnpm run` script auto-installs first when the lockfile changed — a few seconds, normal. Installing or adding packages is allowed: binaries land only in the container's tree, while `package.json`/`pnpm-lock.yaml` edits land in the real repo — treat those like code changes (visible in git, mention them in chat). Never `rm -rf` a `node_modules` directory itself — they're mount points here (clearing their *contents* is fine).
+- **Prisma:** `pnpm db:generate` is fine — engines are per-platform and additive (a Linux engine lands beside Kaloyan's darwin one without breaking it).
+- **Local full builds are not the build gate — CI is.** iOS can't build on Linux; for the real signal rely on the GitHub Actions run on `main`. `pnpm type-check` and `pnpm lint` locally are fine and expected.
+
+## Designs
+
+Local mirrors of Claude Design projects live in `/workspace/group/designs/<name>/`.
+
+**Never try to open a `claude.ai/design/...` URL with `agent-browser`.** Those pages sit
+behind a claude.ai login *and* a Cloudflare bot challenge — the browser gets a
+`403 Just a moment…` interstitial and you will hang waiting for a page that never loads.
+Check `/workspace/group/designs/` for a mirror instead; if the link isn't mirrored yet,
+say so in chat and ask Kaloyan to sync it (he can pull it with the `DesignSync` tool from
+a Claude Code session that has the claude.ai login).
+
+| Mirror | Source project |
+|---|---|
+| `designs/memory-screens/` | "Edit Memory redesign directions" — Memory Details (`2d`), Edit Memory (`3a`/`3b`), voice capture (`4a`). See its `README.md`. |
 
 ## Blueprints
 

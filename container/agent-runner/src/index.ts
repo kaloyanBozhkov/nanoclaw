@@ -22,7 +22,19 @@ import {
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { retry } from '@koko420/shared';
 import { getNotionAccessToken } from './notion-token.js';
+
+// Transient failures worth retrying: rate limits, overloads, and network
+// blips. Permanent failures (refusal, auth, dead session) are not matched —
+// retrying them just wastes attempts before the same error surfaces.
+const RETRYABLE_ERROR =
+  /\b(429|5\d\d)\b|rate.?limit|overloaded|timeout|timed out|ECONNRESET|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|socket hang up|fetch failed|network|stream (?:error|closed)|premature close/i;
+
+function isRetryable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return RETRYABLE_ERROR.test(msg);
+}
 
 interface ContainerInput {
   prompt: string;
@@ -62,7 +74,11 @@ type ContentBlock =
   | { type: 'text'; text: string }
   | {
       type: 'image';
-      source: { type: 'base64'; media_type: string; data: string };
+      source: {
+        type: 'base64';
+        media_type: 'image/png' | 'image/webp' | 'image/gif' | 'image/jpeg';
+        data: string;
+      };
     };
 
 interface SDKUserMessage {
@@ -75,6 +91,30 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+
+// The model the SDK runs on. Initialized from the spawn-time env var and
+// updated live when the host sends a {type:'setmodel'} IPC signal (from the
+// /model chat command). Passed as options.model to every query().
+let currentModel: string | undefined = process.env.ANTHROPIC_MODEL || undefined;
+
+// Handle to the in-flight query so a model switch can apply mid-run via
+// setModel(). Null between queries; the next query() picks up currentModel.
+let activeQuery: ReturnType<typeof query> | null = null;
+
+function applyModelSwitch(model: string): void {
+  currentModel = model;
+  log(`Model switch requested via IPC: ${model}`);
+  // Apply to a running query too, taking effect on its next model turn.
+  // Fire-and-forget; between turns the next query() reads currentModel.
+  activeQuery
+    ?.setModel(model)
+    .then(() => log(`setModel applied to running query: ${model}`))
+    .catch((err) =>
+      log(
+        `setModel failed: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    );
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -389,6 +429,9 @@ function drainIpcInput(): IpcMessage[] {
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
           messages.push({ text: data.text, images: data.images });
+        } else if (data.type === 'setmodel' && data.model) {
+          // Live model switch from the /model chat command.
+          applyModelSwitch(data.model);
         }
       } catch (err) {
         log(
@@ -446,6 +489,7 @@ async function runQuery(
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
+  attemptGuard?: { producedOutput: boolean },
 ): Promise<{
   newSessionId?: string;
   lastAssistantUuid?: string;
@@ -545,9 +589,10 @@ async function runQuery(
 
   const stopHeartbeat = startHeartbeat();
   try {
-    for await (const message of query({
+    const q = query({
       prompt: stream,
       options: {
+        model: currentModel,
         cwd: '/workspace/group',
         additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
         resume: sessionId,
@@ -584,6 +629,13 @@ async function runQuery(
           'mcp__pencil__*',
           'mcp__notion__*',
         ],
+        // Notion's hosted MCP server (v1.2.0, 2026-08) serves this tool with a
+        // top-level `anyOf` in its input schema, which the Anthropic API
+        // rejects — a single bad schema 400s EVERY request from the session
+        // ("tools.N.custom.input_schema does not support oneOf/allOf/anyOf at
+        // the top level"). Deny-listing removes it from the tool list sent to
+        // the API. Revisit when Notion fixes their schema.
+        disallowedTools: ['mcp__notion__notion-create-attachment'],
         env: sdkEnv,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
@@ -630,7 +682,9 @@ async function runQuery(
           ],
         },
       },
-    })) {
+    });
+    activeQuery = q;
+    for await (const message of q) {
       messageCount++;
       const msgType =
         message.type === 'system'
@@ -640,6 +694,10 @@ async function runQuery(
 
       if (message.type === 'assistant' && 'uuid' in message) {
         lastAssistantUuid = (message as { uuid: string }).uuid;
+        // The agent has started producing real work this attempt (text or
+        // tool calls). From here on a retry could re-run non-idempotent tool
+        // calls or double-send messages, so mark the attempt non-replayable.
+        if (attemptGuard) attemptGuard.producedOutput = true;
       }
 
       if (message.type === 'system' && message.subtype === 'init') {
@@ -677,6 +735,7 @@ async function runQuery(
     }
   } finally {
     stopHeartbeat();
+    activeQuery = null;
   }
 
   ipcPolling = false;
@@ -753,13 +812,40 @@ async function main(): Promise<void> {
         `Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`,
       );
 
-      const queryResult = await runQuery(
-        prompt,
-        sessionId,
-        mcpServerPath,
-        containerInput,
-        sdkEnv,
-        resumeAt,
+      // Retry transient failures (rate limits, overloads, network blips) with
+      // exponential backoff so a momentary hiccup no longer kills the session
+      // mid-work. The guard makes retries safe: once the agent has produced
+      // any output this turn, we stop replaying (a fresh query() could re-run
+      // tool calls or double-send messages) and let the error surface.
+      const attemptGuard = { producedOutput: false };
+      const queryResult = await retry(
+        async () => {
+          if (attemptGuard.producedOutput) {
+            throw new Error(
+              'not retrying after partial agent output (avoids replaying tool calls)',
+            );
+          }
+          try {
+            return await runQuery(
+              prompt,
+              sessionId,
+              mcpServerPath,
+              containerInput,
+              sdkEnv,
+              resumeAt,
+              attemptGuard,
+            );
+          } catch (err) {
+            if (!attemptGuard.producedOutput && isRetryable(err)) {
+              log(
+                `Transient query error, will retry: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+            throw err;
+          }
+        },
+        3,
+        true,
       );
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;

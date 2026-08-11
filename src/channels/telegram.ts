@@ -15,6 +15,7 @@ import {
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
+  SendMediaOptions,
 } from '../types.js';
 
 const WHISPER_MODEL_PATH = path.join(
@@ -77,6 +78,60 @@ function transcribeVoice(oggPath: string): string {
     try {
       fs.unlinkSync(wavPath);
     } catch {}
+  }
+}
+
+/**
+ * Telegram rejects a whole send when a caption's Markdown doesn't parse —
+ * an unclosed entity from a stray `_` or `*` (e.g. "see file_name.png").
+ */
+function isCaptionParseError(err: unknown): boolean {
+  return err instanceof Error && /can't parse entities/i.test(err.message);
+}
+
+/** Telegram Bot API upload ceiling for uploaded files. */
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+/** Telegram compresses photos and caps them well below other file types. */
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+
+type MediaKind =
+  | 'photo'
+  | 'animation'
+  | 'video'
+  | 'audio'
+  | 'voice'
+  | 'document';
+
+/**
+ * Pick the Telegram send method for a file, by extension.
+ *
+ * Every typed method re-encodes: sendPhoto flattens animation to one JPEG
+ * frame, sendAnimation/sendVideo transcode to MP4 (dropping any alpha
+ * channel). sendDocument is the only lossless option, and the only one that
+ * accepts arbitrary types — Telegram's typed methods each take a narrow
+ * format list and reject the rest, so anything unrecognised goes as a
+ * document rather than a guess that errors.
+ */
+function mediaKindFor(filePath: string): MediaKind {
+  switch (path.extname(filePath).toLowerCase()) {
+    case '.jpg':
+    case '.jpeg':
+    case '.png':
+    case '.webp':
+      return 'photo';
+    case '.gif':
+      return 'animation';
+    case '.mp4':
+      return 'video';
+    case '.mp3':
+    case '.m4a':
+      return 'audio';
+    case '.ogg':
+    case '.oga':
+    case '.opus':
+      return 'voice';
+    default:
+      return 'document';
   }
 }
 
@@ -449,25 +504,100 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  async sendPhoto(
+  /**
+   * Send any file type. Errors propagate: a swallowed failure here is how a
+   * GIF could be reported as delivered while the user received a flattened
+   * JPEG, so callers need to be able to see the send fail.
+   */
+  async sendMedia(
     jid: string,
     filePath: string,
-    caption?: string,
+    options: SendMediaOptions = {},
   ): Promise<void> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
       return;
     }
 
-    try {
-      const numericId = jid.replace(/^tg:/, '');
-      await this.bot.api.sendPhoto(numericId, new InputFile(filePath), {
-        ...(caption ? { caption, parse_mode: 'Markdown' } : {}),
-      });
-      logger.info({ jid, filePath }, 'Telegram photo sent');
-    } catch (err) {
-      logger.error({ jid, filePath, err }, 'Failed to send Telegram photo');
+    const numericId = jid.replace(/^tg:/, '');
+    const { size } = fs.statSync(filePath);
+    if (size > MAX_UPLOAD_BYTES) {
+      throw new Error(
+        `${path.basename(filePath)} is ${(size / 1024 / 1024).toFixed(1)}MB — over Telegram's ${MAX_UPLOAD_BYTES / 1024 / 1024}MB bot upload limit`,
+      );
     }
+
+    let kind: MediaKind =
+      options.as === 'document' ? 'document' : mediaKindFor(filePath);
+    // Telegram rejects oversized photos outright; as a document it still arrives.
+    if (kind === 'photo' && size > MAX_PHOTO_BYTES) kind = 'document';
+
+    // A fresh InputFile per attempt — the underlying stream is single-use.
+    const send = (as: MediaKind, markdown: boolean) => {
+      const file = new InputFile(filePath);
+      const opts = options.caption
+        ? {
+            caption: options.caption,
+            ...(markdown ? { parse_mode: 'Markdown' as const } : {}),
+          }
+        : {};
+      switch (as) {
+        case 'photo':
+          return this.bot!.api.sendPhoto(numericId, file, opts);
+        case 'animation':
+          return this.bot!.api.sendAnimation(numericId, file, opts);
+        case 'video':
+          return this.bot!.api.sendVideo(numericId, file, opts);
+        case 'audio':
+          return this.bot!.api.sendAudio(numericId, file, opts);
+        case 'voice':
+          return this.bot!.api.sendVoice(numericId, file, opts);
+        case 'document':
+          return this.bot!.api.sendDocument(numericId, file, opts);
+      }
+    };
+
+    // Mirrors sendTelegramMessage: retry without Markdown when the caption
+    // fails to parse. Losing the formatting beats losing the file.
+    const sendWithCaption = async (as: MediaKind) => {
+      try {
+        return await send(as, true);
+      } catch (err) {
+        if (!options.caption || !isCaptionParseError(err)) throw err;
+        logger.debug(
+          { jid, filePath, as },
+          'Markdown caption rejected, retrying as plain text',
+        );
+        return await send(as, false);
+      }
+    };
+
+    try {
+      await sendWithCaption(kind);
+      logger.info({ jid, filePath, kind }, 'Telegram media sent');
+    } catch (err) {
+      if (kind === 'document') throw err;
+      // Typed methods are picky about codecs and dimensions beyond what the
+      // extension reveals. Document accepts anything, so retry there before
+      // giving up — delivered-as-a-file beats not delivered.
+      logger.warn(
+        { jid, filePath, kind, err },
+        'Typed Telegram send failed, retrying as document',
+      );
+      await sendWithCaption('document');
+      logger.info(
+        { jid, filePath, kind: 'document' },
+        'Telegram media sent (document fallback)',
+      );
+    }
+  }
+
+  async sendPhoto(
+    jid: string,
+    filePath: string,
+    caption?: string,
+  ): Promise<void> {
+    return this.sendMedia(jid, filePath, { caption });
   }
 
   isConnected(): boolean {

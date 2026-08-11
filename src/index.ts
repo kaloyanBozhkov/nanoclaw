@@ -3,11 +3,17 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  AGENT_MODEL,
   ASSISTANT_NAME,
+  AVAILABLE_MODELS,
+  CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   IDLE_TIMEOUT,
+  isOwnerSender,
+  modelLabel,
   POLL_INTERVAL,
+  resolveModelChoice,
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
@@ -613,6 +619,7 @@ async function runAgent(
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
+      (reschedule) => queue.registerHardTimer(chatJid, reschedule),
     );
 
     if (output.newSessionId) {
@@ -884,6 +891,135 @@ async function main(): Promise<void> {
     );
   }
 
+  // "nosleep" / "yessleep" — configure this group's hard container runtime cap.
+  //   nosleep  → no cap (only the idle timeout can reap the container)
+  //   yessleep → restore the default cap (CONTAINER_TIMEOUT)
+  // Persists per-group and live-applies to a container that is already running,
+  // so it can rescue an in-progress long task.
+  async function handleSleepConfig(
+    chatJid: string,
+    noSleep: boolean,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    const containerConfig = { ...group.containerConfig, noSleep };
+    if (!noSleep) delete containerConfig.timeout; // yessleep → default cap
+    const updated = { ...group, containerConfig };
+
+    try {
+      setRegisteredGroup(chatJid, updated);
+      registeredGroups[chatJid] = updated;
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to persist sleep config');
+      await channel.sendMessage(chatJid, '⚠️ Failed to save sleep setting.');
+      return;
+    }
+
+    // Live-apply to the running container, if any.
+    const capMs = noSleep ? null : CONTAINER_TIMEOUT;
+    const applied = queue.rescheduleHardTimer(chatJid, capMs);
+
+    const hours = Math.round((CONTAINER_TIMEOUT / 3_600_000) * 10) / 10;
+    const scope = applied ? ' (applied to the running agent too)' : '';
+    await channel.sendMessage(
+      chatJid,
+      noSleep
+        ? `🌙 nosleep: this chat's agent will run with no time cap${scope}. Send "yessleep" to restore the ${hours}h cap.`
+        : `😴 yessleep: this chat's agent is capped at ${hours}h again${scope}.`,
+    );
+  }
+
+  // The model this chat's next container will run on: per-group override
+  // (set via /model) or the global default.
+  function currentModelId(chatJid: string): string {
+    return registeredGroups[chatJid]?.containerConfig?.model || AGENT_MODEL;
+  }
+
+  // "/models" — list the models this chat can switch to, numbered, with the
+  // current one marked. Read-only, so allowed for anyone in the chat.
+  async function handleModelsList(chatJid: string): Promise<void> {
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+    const active = currentModelId(chatJid);
+    const lines = AVAILABLE_MODELS.map(
+      (m, i) =>
+        `${i + 1}. ${m.label}${m.id === active ? '  ← current' : ''}`,
+    );
+    await channel.sendMessage(
+      chatJid,
+      `Available models — switch with /model <number|name>:\n${lines.join('\n')}`,
+    );
+  }
+
+  // "/model" (show current) and "/model <number|name>" (switch — owner only).
+  async function handleModelCommand(
+    chatJid: string,
+    arg: string,
+    isOwner: boolean,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    // No argument → report the current model.
+    if (!arg) {
+      const id = currentModelId(chatJid);
+      await channel.sendMessage(
+        chatJid,
+        `Current model for this chat: ${modelLabel(id)} (${id}). Use /models to see options.`,
+      );
+      return;
+    }
+
+    // Switching is owner-only.
+    if (!isOwner) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ Only the owner can switch the model.',
+      );
+      return;
+    }
+
+    const choice = resolveModelChoice(arg);
+    if (!choice) {
+      const list = AVAILABLE_MODELS.map(
+        (m, i) => `${i + 1}. ${m.label}`,
+      ).join('\n');
+      await channel.sendMessage(
+        chatJid,
+        `⚠️ Unknown model "${arg}". Pick one:\n${list}`,
+      );
+      return;
+    }
+
+    const containerConfig = { ...group.containerConfig, model: choice.id };
+    const updated = { ...group, containerConfig };
+    try {
+      setRegisteredGroup(chatJid, updated);
+      registeredGroups[chatJid] = updated;
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to persist model switch');
+      await channel.sendMessage(chatJid, '⚠️ Failed to save model setting.');
+      return;
+    }
+
+    // Apply live to a running container via IPC (agent-runner calls
+    // query.setModel), else it applies on the next spawn from the persisted
+    // per-group config.
+    const applied = queue.sendModelSwitch(chatJid, choice.id);
+    const note = applied
+      ? ' Applied to the running agent — takes effect from its next turn.'
+      : ' Applies to your next message.';
+    await channel.sendMessage(
+      chatJid,
+      `✅ Model set to ${choice.label} (${choice.id}) for this chat.${note}`,
+    );
+  }
+
   // Handle /remote-control and /remote-control-end commands
   async function handleRemoteControl(
     command: string,
@@ -993,6 +1129,33 @@ async function main(): Promise<void> {
       if (trimmed === '/info') {
         handleInfo(chatJid).catch((err) =>
           logger.error({ err, chatJid }, 'Info command error'),
+        );
+        return;
+      }
+
+      // nosleep / yessleep — toggle this group's hard container runtime cap.
+      // Intercepted before storage so it never reaches the agent.
+      const sleepCmd = trimmed.toLowerCase();
+      if (sleepCmd === 'nosleep' || sleepCmd === 'yessleep') {
+        handleSleepConfig(chatJid, sleepCmd === 'nosleep').catch((err) =>
+          logger.error({ err, chatJid }, 'Sleep config command error'),
+        );
+        return;
+      }
+
+      // /models — list selectable models. /model [number|name] — show current
+      // or switch (switching is owner-only). Intercepted before storage.
+      if (sleepCmd === '/models') {
+        handleModelsList(chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Models list command error'),
+        );
+        return;
+      }
+      if (sleepCmd === '/model' || sleepCmd.startsWith('/model ')) {
+        const arg = trimmed.slice('/model'.length).trim();
+        const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
+        handleModelCommand(chatJid, arg, isOwner).catch((err) =>
+          logger.error({ err, chatJid }, 'Model command error'),
         );
         return;
       }
@@ -1120,14 +1283,14 @@ async function main(): Promise<void> {
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
     },
-    sendPhoto: async (jid, filePath, caption) => {
+    sendMedia: async (jid, filePath, options) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      if (!channel.sendPhoto) {
-        logger.warn({ jid }, 'Channel does not support sendPhoto');
-        return;
-      }
-      return channel.sendPhoto(jid, filePath, caption);
+      if (channel.sendMedia) return channel.sendMedia(jid, filePath, options);
+      // Legacy channels only do images — better a flattened send than none.
+      if (channel.sendPhoto)
+        return channel.sendPhoto(jid, filePath, options?.caption);
+      logger.warn({ jid }, 'Channel does not support sending media');
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

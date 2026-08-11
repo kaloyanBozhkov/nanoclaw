@@ -1,3 +1,7 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 // --- Mocks ---
@@ -40,6 +44,12 @@ vi.mock('grammy', () => ({
     api = {
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
+      sendPhoto: vi.fn().mockResolvedValue(undefined),
+      sendAnimation: vi.fn().mockResolvedValue(undefined),
+      sendVideo: vi.fn().mockResolvedValue(undefined),
+      sendAudio: vi.fn().mockResolvedValue(undefined),
+      sendVoice: vi.fn().mockResolvedValue(undefined),
+      sendDocument: vi.fn().mockResolvedValue(undefined),
     };
 
     constructor(token: string) {
@@ -66,6 +76,9 @@ vi.mock('grammy', () => ({
     }
 
     stop() {}
+  },
+  InputFile: class MockInputFile {
+    constructor(public path: string) {}
   },
 }));
 
@@ -948,6 +961,138 @@ describe('TelegramChannel', () => {
     it('has name "telegram"', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       expect(channel.name).toBe('telegram');
+    });
+  });
+
+  // --- Outbound media ---
+
+  describe('sendMedia', () => {
+    let tmpDir: string;
+
+    async function connectedChannel() {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      return channel;
+    }
+
+    /** Real file on disk — sendMedia stats it to enforce upload limits. */
+    function fixture(name: string, bytes = 16): string {
+      const p = path.join(tmpDir, name);
+      fs.writeFileSync(p, Buffer.alloc(bytes));
+      return p;
+    }
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-media-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it.each([
+      ['still.png', 'sendPhoto'],
+      ['still.jpg', 'sendPhoto'],
+      ['still.webp', 'sendPhoto'],
+      ['clip.gif', 'sendAnimation'],
+      ['clip.mp4', 'sendVideo'],
+      ['song.mp3', 'sendAudio'],
+      ['note.ogg', 'sendVoice'],
+      ['report.pdf', 'sendDocument'],
+      ['bundle.zip', 'sendDocument'],
+      ['clip.webm', 'sendDocument'],
+      ['noextension', 'sendDocument'],
+    ])('routes %s to %s', async (name, method) => {
+      const channel = await connectedChannel();
+      await channel.sendMedia('tg:100200300', fixture(name));
+      expect(botRef.current.api[method]).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends a GIF as animation by default', async () => {
+      const channel = await connectedChannel();
+      await channel.sendMedia('tg:100200300', fixture('clip.gif'));
+      // The original bug: a GIF through sendPhoto arrives as one flat JPEG frame.
+      expect(botRef.current.api.sendPhoto).not.toHaveBeenCalled();
+      expect(botRef.current.api.sendAnimation).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends raw bytes as a document when asked, preserving alpha', async () => {
+      const channel = await connectedChannel();
+      await channel.sendMedia('tg:100200300', fixture('transparent.gif'), {
+        as: 'document',
+      });
+      // Animation would transcode to MP4 and drop the alpha channel.
+      expect(botRef.current.api.sendAnimation).not.toHaveBeenCalled();
+      expect(botRef.current.api.sendDocument).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes a caption with Markdown parsing', async () => {
+      const channel = await connectedChannel();
+      await channel.sendMedia('tg:100200300', fixture('clip.mp4'), {
+        caption: '*bold*',
+      });
+      expect(botRef.current.api.sendVideo).toHaveBeenCalledWith(
+        '100200300',
+        expect.anything(),
+        { caption: '*bold*', parse_mode: 'Markdown' },
+      );
+    });
+
+    it('retries with a plain caption when Markdown fails to parse', async () => {
+      const channel = await connectedChannel();
+      // Telegram reads the `_` in send_image as an unclosed italic entity.
+      const caption = 'legacy send_image + new host router';
+      botRef.current.api.sendAnimation.mockRejectedValueOnce(
+        new Error(
+          "Call to 'sendAnimation' failed! (400: Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 28)",
+        ),
+      );
+      await channel.sendMedia('tg:100200300', fixture('clip.gif'), { caption });
+
+      expect(botRef.current.api.sendAnimation).toHaveBeenCalledTimes(2);
+      // Still an animation, not downgraded to a document — only the formatting drops.
+      expect(botRef.current.api.sendAnimation).toHaveBeenLastCalledWith(
+        '100200300',
+        expect.anything(),
+        { caption },
+      );
+      expect(botRef.current.api.sendDocument).not.toHaveBeenCalled();
+    });
+
+    it('falls back to document when the typed send fails', async () => {
+      const channel = await connectedChannel();
+      botRef.current.api.sendVideo.mockRejectedValueOnce(
+        new Error('unsupported codec'),
+      );
+      await channel.sendMedia('tg:100200300', fixture('clip.mp4'));
+      expect(botRef.current.api.sendDocument).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends an oversized photo as a document rather than failing', async () => {
+      const channel = await connectedChannel();
+      await channel.sendMedia(
+        'tg:100200300',
+        fixture('huge.png', 11 * 1024 * 1024),
+      );
+      expect(botRef.current.api.sendPhoto).not.toHaveBeenCalled();
+      expect(botRef.current.api.sendDocument).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws over the 50MB upload limit', async () => {
+      const channel = await connectedChannel();
+      await expect(
+        channel.sendMedia('tg:100200300', fixture('huge.mp4', 51 * 1024 * 1024)),
+      ).rejects.toThrow(/50MB/);
+    });
+
+    it('propagates a document send failure instead of reporting success', async () => {
+      const channel = await connectedChannel();
+      botRef.current.api.sendDocument.mockRejectedValueOnce(
+        new Error('network down'),
+      );
+      await expect(
+        channel.sendMedia('tg:100200300', fixture('report.pdf')),
+      ).rejects.toThrow('network down');
     });
   });
 });
