@@ -17,6 +17,12 @@ vi.mock('./config.js', () => ({
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
   TIMEZONE: 'America/Los_Angeles',
+  orgPlaceholder: (name: string) => `nanoclaw:${name}`,
+  resolveGroupOrg: (configured?: string) => ({
+    name: configured ?? 'default',
+    authMode: 'oauth' as const,
+    envKey: 'CLAUDE_CODE_OAUTH_TOKEN',
+  }),
 }));
 
 // Mock logger

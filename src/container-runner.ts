@@ -17,6 +17,8 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  orgPlaceholder,
+  resolveGroupOrg,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -456,6 +458,7 @@ function buildContainerArgs(
   containerName: string,
   model: string,
   artifactMounts: ArtifactMount[] = [],
+  orgName?: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -475,11 +478,16 @@ function buildContainerArgs(
   // API key mode: SDK sends x-api-key, proxy replaces with real key.
   // OAuth mode:   SDK exchanges placeholder token for temp API key,
   //               proxy injects real OAuth token on that exchange request.
-  const authMode = detectAuthMode();
-  if (authMode === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+  // The container is handed a routing key, never a credential: the proxy maps
+  // `nanoclaw:<org>` to the secret for the identity this chat runs as. Which
+  // header carries it depends on that org's auth mode, not the host's.
+  const org = resolveGroupOrg(orgName);
+  const orgAuthMode = org?.authMode ?? detectAuthMode();
+  const credential = org ? orgPlaceholder(org.name) : 'placeholder';
+  if (orgAuthMode === 'api-key') {
+    args.push('-e', `ANTHROPIC_API_KEY=${credential}`);
   } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${credential}`);
   }
 
   // Pass GitHub token for git/gh CLI access inside containers
@@ -592,6 +600,23 @@ export async function runContainerAgent(
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   // Per-group model override (set via /model), falling back to the global default.
   const model = group.containerConfig?.model || AGENT_MODEL;
+  // Per-group Anthropic identity (set via /switch); resolved to a routing key
+  // inside buildContainerArgs — the secret itself never reaches the container.
+  const orgName = group.containerConfig?.org;
+  if (orgName && !resolveGroupOrg(orgName)) {
+    // Pinned to an identity that is no longer in .env. Refuse rather than fall
+    // back — running this chat on a different account is worse than not
+    // running it.
+    logger.error(
+      { group: group.name, org: orgName },
+      'Configured Anthropic org is missing from .env — refusing to spawn',
+    );
+    return {
+      status: 'error',
+      result: null,
+      error: `This chat is set to the Anthropic org "${orgName}", which is no longer configured in .env. Run /org to see what is available, then /switch to one of them.`,
+    };
+  }
   const artifactMounts = collectArtifactMounts(
     mounts,
     group.folder,
@@ -604,6 +629,7 @@ export async function runContainerAgent(
     containerName,
     model,
     artifactMounts,
+    orgName,
   );
 
   logger.debug(

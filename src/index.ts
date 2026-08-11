@@ -12,9 +12,12 @@ import {
   EPHEMERAL_GROUP_DIRS,
   IDLE_TIMEOUT,
   isOwnerSender,
+  listOrgs,
   modelLabel,
   POLL_INTERVAL,
+  resolveGroupOrg,
   resolveModelChoice,
+  resolveOrg,
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
@@ -955,6 +958,134 @@ async function main(): Promise<void> {
     );
   }
 
+  // "/org" — which Anthropic identity this chat runs as, and what else is
+  // available. Read-only, so anyone in the chat may ask.
+  async function handleOrgCommand(chatJid: string): Promise<void> {
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    const orgs = listOrgs();
+    if (orgs.length === 0) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ No Anthropic identity configured. Set CLAUDE_CODE_OAUTH_TOKEN (or an ANTHROPIC_ORG_<NAME>_OAUTH_TOKEN) in .env.',
+      );
+      return;
+    }
+
+    const active = resolveGroupOrg(
+      registeredGroups[chatJid]?.containerConfig?.org,
+    );
+    const lines = orgs.map((o) => {
+      const mode = o.authMode === 'oauth' ? 'OAuth' : 'API key';
+      const note =
+        o.authMode === 'api-key' ? '    (no Claude Design access)' : '';
+      const marker = o.name === active?.name ? '  ← active' : '';
+      return `  ${o.name} — ${mode}${note}${marker}`;
+    });
+
+    await channel.sendMessage(
+      chatJid,
+      `This chat: ${active?.name ?? 'none'}` +
+        `${active ? ` (${active.authMode === 'oauth' ? 'OAuth' : 'API key'})` : ''}\n\n` +
+        `${lines.join('\n')}\n\nSwitch with /switch <name>`,
+    );
+  }
+
+  // "/switch <org>" — change the identity this chat authenticates as.
+  // Owner only. Applies on the next container: the running one already holds a
+  // token scoped to the old org and cannot be re-scoped in place.
+  async function handleSwitchCommand(
+    chatJid: string,
+    arg: string,
+    isOwner: boolean,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    if (!arg) {
+      await channel.sendMessage(
+        chatJid,
+        'Usage: /switch <org>. Run /org to see what is available.',
+      );
+      return;
+    }
+
+    if (!isOwner) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ Only the owner can switch the Anthropic identity.',
+      );
+      return;
+    }
+
+    const org = resolveOrg(arg);
+    if (!org) {
+      const names = listOrgs()
+        .map((o) => o.name)
+        .join(', ');
+      await channel.sendMessage(
+        chatJid,
+        `⚠️ Unknown org "${arg}". Available: ${names || 'none configured'}.`,
+      );
+      return;
+    }
+
+    const current = resolveGroupOrg(group.containerConfig?.org);
+    if (current?.name === org.name) {
+      await channel.sendMessage(
+        chatJid,
+        `Already on ${org.name}. Nothing to do.`,
+      );
+      return;
+    }
+
+    const containerConfig = { ...group.containerConfig, org: org.name };
+    const updated = { ...group, containerConfig };
+    try {
+      setRegisteredGroup(chatJid, updated);
+      registeredGroups[chatJid] = updated;
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to persist org switch');
+      await channel.sendMessage(chatJid, '⚠️ Failed to save org setting.');
+      return;
+    }
+
+    // End the current session: it holds a credential scoped to the old
+    // identity, and carrying that conversation across accounts is exactly what
+    // switching is meant to prevent. Org-scoped caches go with it.
+    queue.closeStdin(chatJid);
+    for (const target of collectResetTargets(group.folder)) {
+      if (target.label === 'conversation history') continue; // history is not org-scoped
+      for (const p of target.paths) {
+        try {
+          fs.rmSync(p, { recursive: true, force: true });
+        } catch (err) {
+          logger.warn(
+            { err, chatJid, target: target.label },
+            'Failed to clear org-scoped cache on switch',
+          );
+        }
+      }
+    }
+
+    logger.info(
+      { chatJid, org: org.name, authMode: org.authMode },
+      'Anthropic identity switched via /switch',
+    );
+    const designNote =
+      org.authMode === 'api-key'
+        ? ' Note: API-key identities cannot read Claude Design files.'
+        : '';
+    await channel.sendMessage(
+      chatJid,
+      `Switched to ${org.name} (${org.authMode === 'oauth' ? 'OAuth' : 'API key'}). ` +
+        `The next message starts a fresh session on that account.${designNote}`,
+    );
+  }
+
   // "/model" (show current) and "/model <number|name>" (switch — owner only).
   async function handleModelCommand(
     chatJid: string,
@@ -1157,6 +1288,20 @@ async function main(): Promise<void> {
         const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
         handleModelCommand(chatJid, arg, isOwner).catch((err) =>
           logger.error({ err, chatJid }, 'Model command error'),
+        );
+        return;
+      }
+      if (sleepCmd === '/org') {
+        handleOrgCommand(chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Org command error'),
+        );
+        return;
+      }
+      if (sleepCmd === '/switch' || sleepCmd.startsWith('/switch ')) {
+        const arg = trimmed.slice('/switch'.length).trim();
+        const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
+        handleSwitchCommand(chatJid, arg, isOwner).catch((err) =>
+          logger.error({ err, chatJid }, 'Switch command error'),
         );
         return;
       }

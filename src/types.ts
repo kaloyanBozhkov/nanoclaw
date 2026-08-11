@@ -34,6 +34,10 @@ export interface ContainerConfig {
   // Per-group model override (set via /model). Falls back to AGENT_MODEL.
   // Must be one of AVAILABLE_MODELS' ids.
   model?: string;
+  // Anthropic identity this chat authenticates and bills as (set via /switch).
+  // Just the org NAME — the credential itself never leaves .env. Falls back to
+  // DEFAULT_ORG_NAME.
+  org?: string;
   // When true, the container has NO hard runtime cap ("nosleep" via chat).
   // Only the idle timeout can reap it. Set false / cleared by "yessleep".
   noSleep?: boolean;

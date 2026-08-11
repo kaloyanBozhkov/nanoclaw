@@ -1,7 +1,8 @@
 import os from 'os';
 import path from 'path';
 
-import { readEnvFile } from './env.js';
+import { readEnvFile, readEnvPrefixed } from './env.js';
+import { logger } from './logger.js';
 
 // Read config values from .env (falls back to process.env).
 // Secrets (API keys, tokens) are NOT read here — they are loaded only
@@ -16,6 +17,7 @@ const envConfig = readEnvFile([
   'CONTAINER_IMAGE',
   'CREDENTIAL_PROXY_PORT',
   'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_ORG',
   'OWNER_IDS',
 ]);
 
@@ -185,4 +187,138 @@ export function resolveModelChoice(arg: string): ModelChoice | null {
 /** Label for a model ID, falling back to the raw ID if not in the list. */
 export function modelLabel(id: string): string {
   return AVAILABLE_MODELS.find((m) => m.id === id)?.label ?? id;
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic identities ("orgs")
+//
+// A chat can bill and authenticate as one of several Anthropic accounts,
+// switched with /switch. Credentials live only in .env and are read on demand:
+// they never enter the database, a container's environment, or a log. The
+// container is handed the routing key `nanoclaw:<org>` and the credential
+// proxy substitutes the real value on the way out.
+// ---------------------------------------------------------------------------
+
+/** Prefix marking a per-org credential in .env. */
+const ORG_ENV_PREFIX = 'ANTHROPIC_ORG_';
+
+/** The org a chat uses when it has never switched. */
+export const DEFAULT_ORG_NAME =
+  process.env.ANTHROPIC_DEFAULT_ORG || envConfig.ANTHROPIC_DEFAULT_ORG || 'default';
+
+export interface AnthropicOrg {
+  /** Lowercase handle used in chat and as the proxy routing key. */
+  name: string;
+  /** Which credential header the proxy injects for this org. */
+  authMode: AuthMode;
+  /** The .env key holding the secret. The value is never cached here. */
+  envKey: string;
+}
+
+export type AuthMode = 'api-key' | 'oauth';
+
+/** The routing key handed to a container in place of a real credential. */
+export function orgPlaceholder(orgName: string): string {
+  return `nanoclaw:${orgName}`;
+}
+
+/** Parse `nanoclaw:<org>` back to an org name; null if not one of ours. */
+export function parseOrgPlaceholder(value: string): string | null {
+  const trimmed = value.trim().replace(/^Bearer\s+/i, '');
+  if (!trimmed.startsWith('nanoclaw:')) return null;
+  const name = trimmed.slice('nanoclaw:'.length).trim().toLowerCase();
+  return name || null;
+}
+
+/**
+ * Every identity defined in .env.
+ *
+ * The legacy single-credential setup registers as `default`, so an install
+ * that never defines an `ANTHROPIC_ORG_*` key keeps working untouched.
+ * The suffix declares the auth mode, which is why no separate mode config
+ * exists to fall out of sync:
+ *   ANTHROPIC_ORG_WORK_OAUTH_TOKEN → oauth
+ *   ANTHROPIC_ORG_SIDE_API_KEY     → api-key
+ */
+export function listOrgs(): AnthropicOrg[] {
+  const orgs: AnthropicOrg[] = [];
+
+  const legacy = readEnvFile(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']);
+  if (legacy.ANTHROPIC_API_KEY) {
+    orgs.push({
+      name: DEFAULT_ORG_NAME,
+      authMode: 'api-key',
+      envKey: 'ANTHROPIC_API_KEY',
+    });
+  } else if (legacy.CLAUDE_CODE_OAUTH_TOKEN) {
+    orgs.push({
+      name: DEFAULT_ORG_NAME,
+      authMode: 'oauth',
+      envKey: 'CLAUDE_CODE_OAUTH_TOKEN',
+    });
+  }
+
+  // Group by org name first: one identity may have both credential kinds
+  // defined, and picking by whichever key sorts first would be arbitrary.
+  const byName = new Map<string, { oauth?: string; apiKey?: string }>();
+  for (const envKey of Object.keys(readEnvPrefixed(ORG_ENV_PREFIX))) {
+    const rest = envKey.slice(ORG_ENV_PREFIX.length);
+    const oauth = rest.match(/^(.+)_OAUTH_TOKEN$/);
+    const apiKey = rest.match(/^(.+)_API_KEY$/);
+    const match = oauth ?? apiKey;
+    if (!match) continue;
+    const name = match[1].toLowerCase();
+    if (!name) continue;
+    const entry = byName.get(name) ?? {};
+    if (oauth) entry.oauth = envKey;
+    else entry.apiKey = envKey;
+    byName.set(name, entry);
+  }
+
+  for (const name of [...byName.keys()].sort()) {
+    if (orgs.some((o) => o.name === name)) continue; // legacy default wins
+    const { oauth, apiKey } = byName.get(name)!;
+    if (oauth && apiKey) {
+      // Prefer OAuth: it is strictly more capable (Claude Design needs it),
+      // so silently choosing the API key would remove capability the user
+      // clearly configured.
+      logger.warn(
+        { org: name, using: oauth, ignoring: apiKey },
+        'Org has both an OAuth token and an API key — using OAuth',
+      );
+    }
+    orgs.push(
+      oauth
+        ? { name, authMode: 'oauth', envKey: oauth }
+        : { name, authMode: 'api-key', envKey: apiKey! },
+    );
+  }
+
+  return orgs;
+}
+
+/** Resolve a /switch argument to a known org. Case-insensitive exact match. */
+export function resolveOrg(arg: string): AnthropicOrg | null {
+  const name = arg.trim().toLowerCase();
+  if (!name) return null;
+  return listOrgs().find((o) => o.name === name) ?? null;
+}
+
+/**
+ * The org a chat runs as, given its persisted override.
+ *
+ * Returns null when a chat is pinned to an org that no longer exists in .env.
+ * It deliberately does NOT fall back to the default there: silently running a
+ * work chat on the personal account is the precise mistake this feature exists
+ * to prevent, and it would bypass the proxy's fail-closed check by never
+ * presenting an unknown org in the first place. Callers must refuse to spawn.
+ */
+export function resolveGroupOrg(
+  configured: string | undefined,
+): AnthropicOrg | null {
+  const orgs = listOrgs();
+  if (configured) {
+    return orgs.find((o) => o.name === configured.toLowerCase()) ?? null;
+  }
+  return orgs.find((o) => o.name === DEFAULT_ORG_NAME) ?? orgs[0] ?? null;
 }

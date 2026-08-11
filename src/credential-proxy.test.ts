@@ -2,9 +2,16 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
 import type { AddressInfo } from 'net';
 
-const mockEnv: Record<string, string> = {};
+const { mockEnv } = vi.hoisted(() => ({
+  mockEnv: {} as Record<string, string>,
+}));
 vi.mock('./env.js', () => ({
   readEnvFile: vi.fn(() => ({ ...mockEnv })),
+  readEnvPrefixed: vi.fn((prefix: string) =>
+    Object.fromEntries(
+      Object.entries(mockEnv).filter(([k]) => k.startsWith(prefix)),
+    ),
+  ),
 }));
 
 vi.mock('./logger.js', () => ({
@@ -188,5 +195,117 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+
+  // --- Per-org routing (/switch) ---
+
+  describe('org routing', () => {
+    const ORGS = {
+      CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-personal',
+      ANTHROPIC_ORG_WORK_OAUTH_TOKEN: 'sk-ant-oat01-work',
+      ANTHROPIC_ORG_SIDE_API_KEY: 'sk-ant-api03-side',
+    };
+
+    async function callAs(
+      routingKey: string,
+      header: 'authorization' | 'x-api-key' = 'authorization',
+    ) {
+      proxyPort = await startProxy(ORGS);
+      const value =
+        header === 'authorization' ? `Bearer ${routingKey}` : routingKey;
+      return makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: { 'content-type': 'application/json', [header]: value },
+        },
+        '{}',
+      );
+    }
+
+    it('swaps an OAuth org key for that org\'s real token', async () => {
+      const res = await callAs('nanoclaw:work');
+      expect(res.statusCode).toBe(200);
+      expect(lastUpstreamHeaders.authorization).toBe(
+        'Bearer sk-ant-oat01-work',
+      );
+      expect(lastUpstreamHeaders['x-api-key']).toBeUndefined();
+    });
+
+    it('routes the default org to the legacy credential', async () => {
+      const res = await callAs('nanoclaw:default');
+      expect(res.statusCode).toBe(200);
+      expect(lastUpstreamHeaders.authorization).toBe(
+        'Bearer sk-ant-oat01-personal',
+      );
+    });
+
+    it('uses x-api-key for an api-key org, whichever header carried the key', async () => {
+      const res = await callAs('nanoclaw:side');
+      expect(res.statusCode).toBe(200);
+      expect(lastUpstreamHeaders['x-api-key']).toBe('sk-ant-api03-side');
+      expect(lastUpstreamHeaders.authorization).toBeUndefined();
+    });
+
+    it('accepts the routing key on x-api-key too', async () => {
+      const res = await callAs('nanoclaw:work', 'x-api-key');
+      expect(res.statusCode).toBe(200);
+      expect(lastUpstreamHeaders.authorization).toBe(
+        'Bearer sk-ant-oat01-work',
+      );
+    });
+
+    // Falling through to the default identity on a typo would silently bill
+    // the wrong account — the exact failure this feature exists to prevent.
+    it('fails closed on an unknown org and never reaches upstream', async () => {
+      const res = await callAs('nanoclaw:nope');
+      expect(res.statusCode).toBe(401);
+      expect(JSON.parse(res.body).error.message).toContain('unknown org');
+      expect(lastUpstreamHeaders).toEqual({});
+    });
+
+    it('fails closed when the org exists but its secret is empty', async () => {
+      proxyPort = await startProxy({
+        ...ORGS,
+        ANTHROPIC_ORG_WORK_OAUTH_TOKEN: '',
+      });
+      const res = await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: {
+            'content-type': 'application/json',
+            authorization: 'Bearer nanoclaw:work',
+          },
+        },
+        '{}',
+      );
+      expect(res.statusCode).toBe(401);
+      expect(lastUpstreamHeaders).toEqual({});
+    });
+
+    // After the OAuth exchange the container holds a real temp key and sends
+    // no routing key at all — that traffic must pass through untouched.
+    it('passes a post-exchange temp key through unchanged', async () => {
+      proxyPort = await startProxy(ORGS);
+      const res = await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: {
+            'content-type': 'application/json',
+            'x-api-key': 'sk-ant-temp-minted-by-anthropic',
+          },
+        },
+        '{}',
+      );
+      expect(res.statusCode).toBe(200);
+      expect(lastUpstreamHeaders['x-api-key']).toBe(
+        'sk-ant-temp-minted-by-anthropic',
+      );
+    });
   });
 });

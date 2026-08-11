@@ -109,6 +109,96 @@ From the main channel (your self-chat), you can manage groups and tasks:
 @Andy join the Family Chat group
 ```
 
+### Chat commands
+
+Commands are handled by the host and never reach the agent, so they work even
+while it's mid-task. They apply to the chat you send them in.
+
+**Session**
+
+| Command | What it does |
+|---|---|
+| `/new` | Start a fresh conversation. Shows exactly what will be deleted and waits for confirmation — **List files** expands the full path breakdown. Auto-memory, design briefs, and the group's `CLAUDE.md` are always kept. |
+| `/stop` | Stop the running agent, reporting what it had done so far. |
+| `/info` | What the agent is working on right now. Read-only; says so when idle. |
+
+Run `/add-compact` in Claude Code to also get `/compact`, which reclaims context
+in a long session without clearing it.
+
+**Model**
+
+| Command | What it does |
+|---|---|
+| `/models` | List selectable models, numbered, marking the current one. |
+| `/model` | Show the model this chat uses. |
+| `/model <number\|name>` | Switch model — e.g. `/model 2`, `/model opus`, `/model fable`. Owner only. Applies to the running agent immediately where possible, otherwise on the next message. |
+
+**Anthropic identity**
+
+A chat authenticates and bills as one identity, so a work chat can use a work
+account while everything else stays personal. Credentials live only in `.env`;
+containers receive a routing key, never a token. See
+[Anthropic identities](#anthropic-identities).
+
+| Command | What it does |
+|---|---|
+| `/org` | The identity this chat uses, plus the others available and whether each can read Claude Design files. |
+| `/switch <name>` | Switch identity — e.g. `/switch work`. Owner only. Ends the current session and clears identity-scoped caches, since a conversation can't change accounts midway. |
+
+**Runtime**
+
+| Command | What it does |
+|---|---|
+| `nosleep` | Remove this chat's hard runtime cap, for long jobs. No leading slash. The idle timeout still applies. |
+| `yessleep` | Restore the default cap. |
+
+**Pins**
+
+| Command | What it does |
+|---|---|
+| `/pin <text>` or `📌 <text>` | Pin a note to this chat's context. |
+| `/pins` | List pins with their numbers. |
+| `/unpin <number>` | Remove a pin. |
+
+**Setup and diagnostics**
+
+| Command | What it does |
+|---|---|
+| `/chatid` | This chat's registration ID — what you need to register a group. Telegram only. |
+| `/ping` | Confirm the bot is running. Telegram only. |
+| `/remote-control` / `/remote-control-end` | Start or end a Remote Control session. |
+
+Owner-only commands are restricted to `OWNER_IDS` in `.env` (Telegram numeric
+user IDs, comma-separated) plus messages from your own account.
+
+### Anthropic identities
+
+Each chat runs as one Anthropic account. A single-account setup needs nothing —
+the existing credential registers as the identity named `default`.
+
+To add another, put it in `.env`. The suffix declares how it authenticates:
+
+```bash
+# _OAUTH_TOKEN → claude.ai OAuth  (required to read Claude Design files)
+# _API_KEY     → console API key  (cannot read Claude Design files)
+ANTHROPIC_ORG_WORK_OAUTH_TOKEN=sk-ant-oat01-...
+ANTHROPIC_ORG_SIDE_API_KEY=sk-ant-api03-...
+
+# Which identity a chat uses before it has ever switched. Defaults to "default".
+ANTHROPIC_DEFAULT_ORG=default
+```
+
+The name comes from the middle segment, lowercased — the keys above give you
+`work` and `side`, so `/switch work`. Generate an OAuth token for an account
+with `claude setup-token` while signed into **that** account in the browser.
+
+The credential never leaves the host. Containers get the routing key
+`nanoclaw:<name>`, and the credential proxy substitutes the real value on
+outbound requests — so no token reaches a container's environment, the
+database, or a log. If a chat is pinned to an identity that is later removed
+from `.env`, the agent refuses to start rather than falling back to a different
+account.
+
 ## Customizing
 
 NanoClaw doesn't use configuration files. To make changes, just tell Claude Code what you want:

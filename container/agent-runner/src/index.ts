@@ -679,7 +679,17 @@ async function runQuery(
                 design: {
                   type: 'http' as const,
                   url: `${process.env.ANTHROPIC_BASE_URL.replace(/\/$/, '')}/v1/design/mcp`,
-                  headers: { Authorization: 'Bearer placeholder' },
+                  // Send the SAME routing key the host gave this container, so
+                  // the proxy resolves it to this chat's Anthropic identity.
+                  // Hardcoding a literal here silently authenticated every
+                  // group as the default identity, regardless of /switch.
+                  headers: {
+                    Authorization: `Bearer ${
+                      process.env.CLAUDE_CODE_OAUTH_TOKEN ||
+                      process.env.ANTHROPIC_API_KEY ||
+                      'placeholder'
+                    }`,
+                  },
                 },
               }
             : {}),
