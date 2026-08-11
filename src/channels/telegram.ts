@@ -359,20 +359,13 @@ export class TelegramChannel implements Channel {
         if (!pending || Date.now() > pending.expiresAt) {
           this.pendingResets.delete(chatJid);
           await safeAnswer(ctx, 'That prompt expired.');
-          await editOrReply(
-            ctx,
-            'Reset prompt expired — nothing was deleted.',
-          );
+          await editOrReply(ctx, 'Reset prompt expired — nothing was deleted.');
           return;
         }
 
         // Anyone can tap a button in a group chat; only the asker decides.
         if (ctx.from.id !== pending.senderId) {
-          await safeAnswer(
-            ctx,
-            'Only whoever ran /new can answer this.',
-            true,
-          );
+          await safeAnswer(ctx, 'Only whoever ran /new can answer this.', true);
           return;
         }
 

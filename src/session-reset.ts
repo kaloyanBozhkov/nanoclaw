@@ -168,10 +168,7 @@ function commonDirPrefix(paths: string[]): string {
   const split = paths.map((p) => p.split('/').slice(0, -1));
   const first = split[0];
   let i = 0;
-  while (
-    i < first.length &&
-    split.every((parts) => parts[i] === first[i])
-  ) {
+  while (i < first.length && split.every((parts) => parts[i] === first[i])) {
     i += 1;
   }
   return first.slice(0, i).join('/');

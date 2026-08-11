@@ -233,9 +233,7 @@ function nonEmptyPreview(files = 2, bytes = 32768) {
       {
         label: 'conversation history',
         paths: ['/abs/a.jsonl'],
-        entries: [
-          { path: '/abs/a.jsonl', display: 'data/a.jsonl', bytes },
-        ],
+        entries: [{ path: '/abs/a.jsonl', display: 'data/a.jsonl', bytes }],
         files,
         bytes,
       },
@@ -323,7 +321,9 @@ describe('TelegramChannel /new confirmation', () => {
     await runCallback(ctx);
 
     expect(opts.onResetSession).not.toHaveBeenCalled();
-    expect(ctx.editMessageText.mock.calls[0][0]).toContain('nothing was deleted');
+    expect(ctx.editMessageText.mock.calls[0][0]).toContain(
+      'nothing was deleted',
+    );
   });
 
   it('expands the file list without deciding, keeping yes/cancel', async () => {

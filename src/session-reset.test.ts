@@ -114,7 +114,9 @@ describe('collectResetTargets', () => {
     }
 
     expect(previewReset(GROUP).empty).toBe(true);
-    expect(fs.existsSync(sessionDir('-workspace-group', 'memory', 'notes.md'))).toBe(true);
+    expect(
+      fs.existsSync(sessionDir('-workspace-group', 'memory', 'notes.md')),
+    ).toBe(true);
     expect(fs.existsSync(groupDir('design-briefs', 'screens.md'))).toBe(true);
     expect(fs.existsSync(groupDir('design-cache'))).toBe(false);
   });
@@ -205,15 +207,12 @@ describe('formatResetFileList', () => {
     expect(text).toMatch(/…and \d+ more files/);
   });
 
-  it.each([1, 20, 105, 500])(
-    'stays under the limit with %i files',
-    (count) => {
-      writeRealisticSession(count);
-      expect(
-        formatResetFileList(previewReset(GROUP)).length,
-      ).toBeLessThanOrEqual(4096);
-    },
-  );
+  it.each([1, 20, 105, 500])('stays under the limit with %i files', (count) => {
+    writeRealisticSession(count);
+    expect(formatResetFileList(previewReset(GROUP)).length).toBeLessThanOrEqual(
+      4096,
+    );
+  });
 
   it('respects an explicit character budget', () => {
     writeRealisticSession(40);
@@ -240,9 +239,7 @@ describe('formatResetFileList', () => {
 
 describe('formatResetPreview', () => {
   it('says nothing-to-do when the session is already fresh', () => {
-    expect(formatResetPreview(previewReset(GROUP))).toContain(
-      'already fresh',
-    );
+    expect(formatResetPreview(previewReset(GROUP))).toContain('already fresh');
   });
 
   it('lists each target and what survives', () => {
