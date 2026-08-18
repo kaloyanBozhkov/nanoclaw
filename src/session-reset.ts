@@ -287,3 +287,25 @@ export function formatResetPreview(preview: ResetPreview): string {
     'Proceed?',
   ].join('\n');
 }
+
+/**
+ * Whether a session id reported by a container is still safe to persist.
+ *
+ * `/new` deletes the transcript and asks the running container to stop, but the
+ * stop is graceful: a container mid-turn keeps going and, when it finally
+ * exits, still reports the session id it had been using. Saving that id
+ * resurrects the transcript `/new` just deleted, and every later message then
+ * resumes a session that is no longer on disk — which fails instantly, retries,
+ * and leaves the chat silent until someone clears it by hand.
+ *
+ * A container that started before the reset can only be carrying a stale id, so
+ * its report is dropped. One started afterwards is describing a fresh session
+ * and is kept.
+ */
+export function shouldPersistSessionId(
+  resetAt: number | undefined,
+  containerStartedAt: number,
+): boolean {
+  if (resetAt === undefined) return true;
+  return resetAt < containerStartedAt;
+}

@@ -3,7 +3,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { collectArtifactMounts, findProjectRoots } from './container-runner.js';
+import {
+  collectArtifactMounts,
+  findProjectRoots,
+} from '../src/container-runner.js';
 
 let tmp: string;
 

@@ -41,7 +41,7 @@ git merge whatsapp/skill/image-vision || {
 
 This merges in:
 - `src/image.ts` (image download, resize via sharp, base64 encoding)
-- `src/image.test.ts` (8 unit tests)
+- `tests/image.test.ts` (8 unit tests)
 - Image attachment handling in `src/channels/whatsapp.ts`
 - Image passing to agent in `src/index.ts` and `src/container-runner.ts`
 - Image content block support in `container/agent-runner/src/index.ts`
@@ -54,7 +54,7 @@ If the merge reports conflicts, resolve them by reading the conflicted files and
 ```bash
 npm install
 npm run build
-npx vitest run src/image.test.ts
+npx vitest run tests/image.test.ts
 ```
 
 All tests must pass and build must be clean before proceeding.

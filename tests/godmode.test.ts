@@ -11,19 +11,19 @@ const STATE_PATH = path.join(tmpRoot, 'godmode.json');
 const DATA_DIR = path.join(tmpRoot, 'data');
 const IPC_DIR = path.join(DATA_DIR, 'ipc');
 
-vi.mock('./config.js', () => ({
+vi.mock('../src/config.js', () => ({
   GODMODE_STATE_PATH: STATE_PATH,
   DATA_DIR,
 }));
 
-vi.mock('./group-folder.js', () => ({
+vi.mock('../src/group-folder.js', () => ({
   resolveGroupIpcPath: (folder: string) => {
     if (!/^[a-zA-Z0-9_-]+$/.test(folder)) throw new Error('invalid folder');
     return path.join(IPC_DIR, folder);
   },
 }));
 
-vi.mock('./open-host.js', () => ({
+vi.mock('../src/open-host.js', () => ({
   // Mirrors the real translator closely enough for these tests: host paths
   // pass through, container-only paths map to nothing.
   resolveContainerPath: (p: string) =>
@@ -36,7 +36,7 @@ const {
   isGodModeEnabled,
   setGodMode,
   MAX_EXEC_TIMEOUT_MS,
-} = await import('./godmode.js');
+} = await import('../src/godmode.js');
 
 const GROUP = 'telegram_main';
 

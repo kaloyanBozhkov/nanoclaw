@@ -62,6 +62,7 @@ import { resolveGroupFolderPath } from './group-folder.js';
 import {
   collectResetTargets,
   previewReset,
+  shouldPersistSessionId,
   type ResetScope,
 } from './session-reset.js';
 import { addPin, formatPinList, listPins, removePin } from './pinned.js';
@@ -87,6 +88,19 @@ export { escapeXml, formatMessages } from './router.js';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
+
+/**
+ * When each group's session was last cleared by `/new`, keyed by group folder.
+ *
+ * `/new` deletes the transcript and asks the container to stop, but the stop is
+ * a graceful `_close` — a container mid-turn keeps running and, on exit, still
+ * reports the session id it was using. Persisting that id resurrects the very
+ * session `/new` just destroyed, and every later message then tries to resume a
+ * transcript that is no longer on disk: the resume fails instantly, forever.
+ * Comparing this stamp against the container's start time tells us the id is
+ * from before the reset, so it can be dropped instead of saved.
+ */
+const sessionResetAt: Record<string, number> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
@@ -603,12 +617,28 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
+  // A session id reported by this container is only valid if no `/new` landed
+  // after the container started — otherwise it names a transcript that has
+  // since been deleted, and saving it would strand the group in a resume loop.
+  const containerStartedAt = Date.now();
+  const persistSession = (newSessionId: string): void => {
+    const resetAt = sessionResetAt[group.folder];
+    if (!shouldPersistSessionId(resetAt, containerStartedAt)) {
+      logger.info(
+        { group: group.name, newSessionId, resetAt, containerStartedAt },
+        'Ignoring session id from a container that predates /new',
+      );
+      return;
+    }
+    sessions[group.folder] = newSessionId;
+    setSession(group.folder, newSessionId);
+  };
+
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          persistSession(output.newSessionId);
         }
         await onOutput(output);
       }
@@ -633,16 +663,18 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      persistSession(output.newSessionId);
     }
 
     if (output.status === 'error') {
       // If the session was not found, clear it so the next attempt starts fresh
-      // instead of retrying the dead session forever.
+      // instead of retrying the dead session forever. A transcript that exists
+      // but has no conversation entries left in it (what `/new` racing a live
+      // container leaves behind) fails differently, so the runner tags those
+      // with SESSION_RESUME_FAILED rather than a message we'd have to guess at.
       if (
         output.error &&
-        /no conversation found/i.test(output.error) &&
+        /no conversation found|SESSION_RESUME_FAILED/i.test(output.error) &&
         sessions[group.folder]
       ) {
         logger.warn(
@@ -1438,6 +1470,10 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     onResetSession: (groupFolder: string, scope: ResetScope = 'all') => {
+      // Stamp before anything else: a container still running right now will
+      // report its (about to be deleted) session id when it finally exits, and
+      // this is what tells runAgent to throw that id away instead of saving it.
+      sessionResetAt[groupFolder] = Date.now();
       deleteSession(groupFolder);
       delete sessions[groupFolder];
 

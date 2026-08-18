@@ -48,7 +48,7 @@ git merge telegram/main || {
 
 This merges in:
 - `src/channels/telegram.ts` (TelegramChannel class with self-registration via `registerChannel`)
-- `src/channels/telegram.test.ts` (unit tests with grammy mock)
+- `tests/telegram.test.ts` (unit tests with grammy mock)
 - `import './telegram.js'` appended to the channel barrel file `src/channels/index.ts`
 - `grammy` npm dependency in `package.json`
 - `TELEGRAM_BOT_TOKEN` in `.env.example`
@@ -60,7 +60,7 @@ If the merge reports conflicts, resolve them by reading the conflicted files and
 ```bash
 npm install
 npm run build
-npx vitest run src/channels/telegram.test.ts
+npx vitest run tests/telegram.test.ts
 ```
 
 All tests must pass (including the new Telegram tests) and build must be clean before proceeding.
@@ -214,7 +214,7 @@ If they say yes, invoke the `/add-telegram-swarm` skill.
 
 To remove Telegram integration:
 
-1. Delete `src/channels/telegram.ts` and `src/channels/telegram.test.ts`
+1. Delete `src/channels/telegram.ts` and `tests/telegram.test.ts`
 2. Remove `import './telegram.js'` from `src/channels/index.ts`
 3. Remove `TELEGRAM_BOT_TOKEN` from `.env`
 4. Remove Telegram registrations from SQLite: `sqlite3 store/messages.db "DELETE FROM registered_groups WHERE jid LIKE 'tg:%'"`

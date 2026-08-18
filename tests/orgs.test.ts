@@ -4,7 +4,7 @@ const { mockEnv } = vi.hoisted(() => ({
   mockEnv: {} as Record<string, string>,
 }));
 
-vi.mock('./env.js', () => ({
+vi.mock('../src/env.js', () => ({
   readEnvFile: vi.fn((keys: string[]) =>
     Object.fromEntries(
       Object.entries(mockEnv).filter(([k]) => keys.includes(k)),
@@ -17,7 +17,7 @@ vi.mock('./env.js', () => ({
   ),
 }));
 
-vi.mock('./logger.js', () => ({
+vi.mock('../src/logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
 }));
 
@@ -27,7 +27,7 @@ const {
   resolveGroupOrg,
   orgPlaceholder,
   parseOrgPlaceholder,
-} = await import('./config.js');
+} = await import('../src/config.js');
 
 function setEnv(entries: Record<string, string>): void {
   for (const k of Object.keys(mockEnv)) delete mockEnv[k];

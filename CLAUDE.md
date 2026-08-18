@@ -40,8 +40,18 @@ Run commands directly—don't tell the user to run them.
 ```bash
 npm run dev          # Run with hot reload
 npm run build        # Compile TypeScript
+npm test             # Run the suite (all tests live in tests/)
+npm run typecheck    # Typecheck src + tests (tsconfig.test.json)
 ./container/build.sh # Rebuild agent container
 ```
+
+Every test lives in `tests/`, never beside the file it covers — one flat folder,
+one `vitest.config.ts` include. New tests go there too, importing across with
+`../src/…`. The exception is skill-owned tests under `.claude/skills/*/tests/`,
+which ship with their skill and run from `vitest.skills.config.ts`.
+
+Agent-runner changes (`container/agent-runner/src/`) need no image rebuild — the
+source is copied per group and recompiled on each container start.
 
 Service management:
 ```bash

@@ -44,7 +44,7 @@ git merge slack/main || {
 
 This merges in:
 - `src/channels/slack.ts` (SlackChannel class with self-registration via `registerChannel`)
-- `src/channels/slack.test.ts` (46 unit tests)
+- `tests/slack.test.ts` (46 unit tests)
 - `import './slack.js'` appended to the channel barrel file `src/channels/index.ts`
 - `@slack/bolt` npm dependency in `package.json`
 - `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in `.env.example`
@@ -56,7 +56,7 @@ If the merge reports conflicts, resolve them by reading the conflicted files and
 ```bash
 npm install
 npm run build
-npx vitest run src/channels/slack.test.ts
+npx vitest run tests/slack.test.ts
 ```
 
 All tests must pass (including the new Slack tests) and build must be clean before proceeding.

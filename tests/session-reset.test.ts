@@ -8,7 +8,7 @@ let tmpRoot: string;
 
 // config resolves DATA_DIR/GROUPS_DIR from PROJECT_ROOT at import time, so
 // point both at a scratch tree before importing the module under test.
-vi.mock('./config.js', () => ({
+vi.mock('../src/config.js', () => ({
   get DATA_DIR() {
     return path.join(tmpRoot, 'data');
   },
@@ -24,7 +24,8 @@ const {
   formatBytes,
   formatResetFileList,
   formatResetPreview,
-} = await import('./session-reset.js');
+  shouldPersistSessionId,
+} = await import('../src/session-reset.js');
 
 const GROUP = 'telegram_demo';
 
@@ -286,5 +287,29 @@ describe('formatResetPreview', () => {
     expect(text).toContain('design-cache — 1 file, 1 B');
     expect(text).toContain('Kept:');
     expect(text).toContain('Proceed?');
+  });
+});
+
+describe('shouldPersistSessionId', () => {
+  it('persists when the group has never been reset', () => {
+    expect(shouldPersistSessionId(undefined, 1_000)).toBe(true);
+  });
+
+  it('persists an id from a container started after the reset', () => {
+    expect(shouldPersistSessionId(1_000, 2_000)).toBe(true);
+  });
+
+  it('drops an id from a container that was already running at reset time', () => {
+    // The regression: `/new` deletes the transcript, the container it asked to
+    // stop exits a moment later, and its stale id would otherwise be written
+    // back over the cleared row — stranding the group on a session whose
+    // transcript no longer exists.
+    expect(shouldPersistSessionId(2_000, 1_000)).toBe(false);
+  });
+
+  it('drops an id when reset and container start land on the same tick', () => {
+    // Same millisecond means the reset cannot be proven to precede the start,
+    // and resurrecting a dead session costs more than losing a live one.
+    expect(shouldPersistSessionId(1_000, 1_000)).toBe(false);
   });
 });

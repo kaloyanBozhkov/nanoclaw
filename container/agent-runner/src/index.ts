@@ -20,6 +20,7 @@ import {
   query,
   HookCallback,
   PreCompactHookInput,
+  PreToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 import { retry } from '@koko420/shared';
@@ -90,7 +91,21 @@ interface SDKUserMessage {
 
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
+const IPC_MESSAGES_DIR = '/workspace/ipc/messages';
 const IPC_POLL_MS = 500;
+
+/** How long to hold a turn open waiting for an answer to AskUserQuestion. */
+const ASK_ANSWER_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * Set while the AskUserQuestion bridge is waiting for a reply.
+ *
+ * The query's own IPC poll and the bridge read the same input directory, and
+ * whichever drains first wins. Without this the user's answer would be piped
+ * into the message stream as a brand-new turn while the tool call that asked
+ * for it sat there unanswered.
+ */
+let ipcReservedForAnswer = false;
 
 // The model the SDK runs on. Initialized from the spawn-time env var and
 // updated live when the host sends a {type:'setmodel'} IPC signal (from the
@@ -226,6 +241,30 @@ function startHeartbeat(): () => void {
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
+
+/**
+ * Keep a dead pipe from taking the process down before the real error is told.
+ *
+ * When the SDK's CLI subprocess exits — which is exactly what a failed session
+ * resume makes it do — anything still writing to its stdin raises EPIPE on a
+ * socket nobody is listening to. Node turns that into an uncaught 'error' event
+ * and kills us mid-throw, so the actual failure never reaches stdout and the
+ * host only ever saw a stack trace. The pipe being gone is not news here: the
+ * query is already failing and its error is on its way up.
+ */
+process.on('uncaughtException', (err: NodeJS.ErrnoException) => {
+  if (err?.code === 'EPIPE' || err?.code === 'ERR_STREAM_DESTROYED') {
+    log(`Ignoring ${err.code} from a transport whose peer has already exited`);
+    return;
+  }
+  log(`Uncaught exception: ${err?.stack || String(err)}`);
+  writeOutput({
+    status: 'error',
+    result: null,
+    error: `Uncaught exception: ${err?.message || String(err)}`,
+  });
+  process.exit(1);
+});
 
 function getSessionSummary(
   sessionId: string,
@@ -477,6 +516,181 @@ function waitForIpcMessage(): Promise<IpcMessage | null> {
 }
 
 /**
+ * Send a message to the chat, the same way the nanoclaw MCP `send_message`
+ * tool does — the host watches this directory and delivers what lands there.
+ */
+function sendChatMessage(
+  chatJid: string,
+  groupFolder: string,
+  text: string,
+): void {
+  fs.mkdirSync(IPC_MESSAGES_DIR, { recursive: true });
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+  const filepath = path.join(IPC_MESSAGES_DIR, filename);
+  const tempPath = `${filepath}.tmp`;
+  fs.writeFileSync(
+    tempPath,
+    JSON.stringify(
+      {
+        type: 'message',
+        chatJid,
+        text,
+        groupFolder,
+        timestamp: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+  );
+  fs.renameSync(tempPath, filepath);
+}
+
+/**
+ * Wait for the user's reply to a question, without consuming `_close`.
+ *
+ * The sentinel is left on disk deliberately: the query loop owns shutdown, and
+ * swallowing it here would leave the container running after the host asked it
+ * to stop.
+ */
+function waitForAnswer(
+  timeoutMs: number,
+): Promise<
+  { status: 'answered'; message: IpcMessage } | { status: 'closed' | 'timeout' }
+> {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve) => {
+    const poll = () => {
+      if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
+        resolve({ status: 'closed' });
+        return;
+      }
+      const messages = drainIpcInput();
+      if (messages.length > 0) {
+        const text = messages.map((m) => m.text).join('\n');
+        const images = messages.flatMap((m) => m.images || []);
+        resolve({
+          status: 'answered',
+          message: { text, images: images.length > 0 ? images : undefined },
+        });
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve({ status: 'timeout' });
+        return;
+      }
+      setTimeout(poll, IPC_POLL_MS);
+    };
+    poll();
+  });
+}
+
+interface AskQuestion {
+  question?: string;
+  header?: string;
+  multiSelect?: boolean;
+  options?: { label?: string; description?: string }[];
+}
+
+/** Render AskUserQuestion's input as something answerable in a chat message. */
+function formatQuestionsForChat(questions: AskQuestion[]): string {
+  const letters = 'abcdefghijklmnopqrstuvwxyz';
+  const lines: string[] = [];
+
+  questions.forEach((q, qi) => {
+    const n = qi + 1;
+    const heading = q.header ? `${n}. *${q.header}*` : `${n}.`;
+    lines.push(heading);
+    lines.push(q.question || '');
+    for (const [oi, opt] of (q.options || []).entries()) {
+      const bullet = `${n}${letters[oi] || oi + 1}`;
+      const desc = opt.description ? ` — ${opt.description}` : '';
+      lines.push(`   ${bullet}) ${opt.label || ''}${desc}`);
+    }
+    if (q.multiSelect) lines.push('   _(pick as many as apply)_');
+    lines.push('');
+  });
+
+  const hint =
+    questions.length > 1
+      ? 'Reply in one message — e.g. "1a, 2b" — or just say it in your own words.'
+      : 'Reply with an option (e.g. "1a") or just say it in your own words.';
+  lines.push(hint);
+
+  return lines.join('\n');
+}
+
+/**
+ * Make AskUserQuestion work on channels that have no widget to render it.
+ *
+ * Left alone, the tool fails instantly with "Answer questions?" and the
+ * question text — which lives inside the tool input — never leaves the
+ * container, so the chat goes quiet and the agent carries on unanswered. This
+ * hook forwards the questions as an ordinary message, waits for the reply, and
+ * hands it back as the tool's result. Denying is how a PreToolUse hook returns
+ * content to the model; the wording matters more than the verdict.
+ */
+function createAskUserQuestionHook(
+  chatJid: string,
+  groupFolder: string,
+): HookCallback {
+  return async (input) => {
+    const toolInput = (input as PreToolUseHookInput).tool_input as {
+      questions?: AskQuestion[];
+    };
+    const questions = toolInput?.questions || [];
+
+    if (questions.length === 0) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason:
+            'AskUserQuestion is unavailable on this channel. Ask your question as a normal message instead.',
+        },
+      };
+    }
+
+    log(`AskUserQuestion intercepted (${questions.length} question(s))`);
+    sendChatMessage(chatJid, groupFolder, formatQuestionsForChat(questions));
+
+    ipcReservedForAnswer = true;
+    let outcome: Awaited<ReturnType<typeof waitForAnswer>>;
+    try {
+      outcome = await waitForAnswer(ASK_ANSWER_TIMEOUT_MS);
+    } finally {
+      ipcReservedForAnswer = false;
+    }
+
+    if (outcome.status === 'answered') {
+      log(`AskUserQuestion answered (${outcome.message.text.length} chars)`);
+      const attached = outcome.message.images?.length
+        ? `\n\n(The user also attached: ${outcome.message.images.join(', ')} — read them if relevant.)`
+        : '';
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason:
+            `The user answered in chat — treat this as the answer to your question and continue, without asking again:\n\n${outcome.message.text}${attached}`,
+        },
+      };
+    }
+
+    log(`AskUserQuestion unanswered (${outcome.status})`);
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason:
+          outcome.status === 'closed'
+            ? 'The chat session was closed before the user answered. Stop and wait for the next message.'
+            : 'The user did not answer in time. Proceed with the most reasonable default, say which assumption you made, and ask again in plain text if it turns out to matter.',
+      },
+    };
+  };
+}
+
+/**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
  * allowing agent teams subagents to run to completion.
@@ -507,6 +721,12 @@ async function runQuery(
   let closedDuringQuery = false;
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
+    // An AskUserQuestion is on screen waiting for its answer. Draining here
+    // would steal that answer and replay it as a new turn instead.
+    if (ipcReservedForAnswer) {
+      setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+      return;
+    }
     if (shouldClose()) {
       log('Close sentinel detected during query, ending stream');
       closedDuringQuery = true;
@@ -707,6 +927,17 @@ async function runQuery(
           PreCompact: [
             { hooks: [createPreCompactHook(containerInput.assistantName)] },
           ],
+          PreToolUse: [
+            {
+              matcher: 'AskUserQuestion',
+              hooks: [
+                createAskUserQuestionHook(
+                  containerInput.chatJid,
+                  containerInput.groupFolder,
+                ),
+              ],
+            },
+          ],
         },
       },
     });
@@ -753,6 +984,27 @@ async function runQuery(
         log(
           `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
         );
+
+        // A non-success subtype (error_during_execution, error_max_turns) is a
+        // failed turn. Reporting it as success told the host "nothing to say"
+        // while the exit code said otherwise, so the real reason never reached
+        // the logs and a dead session retried until the group gave up.
+        if (message.subtype !== 'success') {
+          const detail =
+            textResult ||
+            (message as { error?: string }).error ||
+            message.subtype;
+          // Nothing came back before the failure on a session we were resuming:
+          // the transcript is gone or unreadable, not a mid-turn error. Tag it
+          // so the host drops the session id instead of resuming it forever.
+          const resumeFailed = sessionId && !attemptGuard?.producedOutput;
+          throw new Error(
+            `Claude Code returned an error result: ${detail}${
+              resumeFailed ? ' [SESSION_RESUME_FAILED]' : ''
+            }`,
+          );
+        }
+
         writeOutput({
           status: 'success',
           result: textResult || null,
@@ -913,8 +1165,12 @@ async function main(): Promise<void> {
     log(`Agent error: ${errorMessage}`);
     // Don't re-persist the session ID if the conversation was not found —
     // returning it would cause the host to save a dead session, creating
-    // an infinite retry loop after /new clears session files.
-    const isDeadSession = /no conversation found/i.test(errorMessage);
+    // an infinite retry loop after /new clears session files. SESSION_RESUME_FAILED
+    // covers the other shape of the same problem: a transcript still on disk
+    // but stripped of its conversation entries, which fails without ever
+    // saying "no conversation found".
+    const isDeadSession =
+      /no conversation found|SESSION_RESUME_FAILED/i.test(errorMessage);
     writeOutput({
       status: 'error',
       result: null,

@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "rootDir": "."
+  },
+  // setup/ is deliberately absent: it runs under tsx and imports with explicit
+  // .ts extensions, which tsc rejects without allowImportingTsExtensions. Tests
+  // that reach into it still pull in the files they actually import.
+  "include": ["src/**/*", "tests/**/*"]
+}

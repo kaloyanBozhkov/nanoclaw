@@ -71,7 +71,7 @@ git merge whatsapp/main || {
 
 This merges in:
 - `src/channels/whatsapp.ts` (WhatsAppChannel class with self-registration via `registerChannel`)
-- `src/channels/whatsapp.test.ts` (41 unit tests)
+- `tests/whatsapp.test.ts` (41 unit tests)
 - `src/whatsapp-auth.ts` (standalone WhatsApp authentication script)
 - `setup/whatsapp-auth.ts` (WhatsApp auth setup step)
 - `import './whatsapp.js'` appended to the channel barrel file `src/channels/index.ts`
@@ -86,7 +86,7 @@ If the merge reports conflicts, resolve them by reading the conflicted files and
 ```bash
 npm install
 npm run build
-npx vitest run src/channels/whatsapp.test.ts
+npx vitest run tests/whatsapp.test.ts
 ```
 
 All tests must pass and build must be clean before proceeding.

@@ -42,7 +42,7 @@ This merges in:
 - `container/skills/pdf-reader/pdf-reader` (CLI script)
 - `poppler-utils` in `container/Dockerfile`
 - PDF attachment download in `src/channels/whatsapp.ts`
-- PDF tests in `src/channels/whatsapp.test.ts`
+- PDF tests in `tests/whatsapp.test.ts`
 
 If the merge reports conflicts, resolve them by reading the conflicted files and understanding the intent of both sides.
 
@@ -50,7 +50,7 @@ If the merge reports conflicts, resolve them by reading the conflicted files and
 
 ```bash
 npm run build
-npx vitest run src/channels/whatsapp.test.ts
+npx vitest run tests/whatsapp.test.ts
 ```
 
 ### Rebuild container

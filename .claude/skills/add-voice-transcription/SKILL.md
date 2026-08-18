@@ -51,7 +51,7 @@ git merge whatsapp/skill/voice-transcription || {
 This merges in:
 - `src/transcription.ts` (voice transcription module using OpenAI Whisper)
 - Voice handling in `src/channels/whatsapp.ts` (isVoiceMessage check, transcribeAudioMessage call)
-- Transcription tests in `src/channels/whatsapp.test.ts`
+- Transcription tests in `tests/whatsapp.test.ts`
 - `openai` npm dependency in `package.json`
 - `OPENAI_API_KEY` in `.env.example`
 
@@ -62,7 +62,7 @@ If the merge reports conflicts, resolve them by reading the conflicted files and
 ```bash
 npm install --legacy-peer-deps
 npm run build
-npx vitest run src/channels/whatsapp.test.ts
+npx vitest run tests/whatsapp.test.ts
 ```
 
 All tests must pass and build must be clean before proceeding.

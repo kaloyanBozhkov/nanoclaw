@@ -48,7 +48,7 @@ git merge discord/main || {
 
 This merges in:
 - `src/channels/discord.ts` (DiscordChannel class with self-registration via `registerChannel`)
-- `src/channels/discord.test.ts` (unit tests with discord.js mock)
+- `tests/discord.test.ts` (unit tests with discord.js mock)
 - `import './discord.js'` appended to the channel barrel file `src/channels/index.ts`
 - `discord.js` npm dependency in `package.json`
 - `DISCORD_BOT_TOKEN` in `.env.example`
@@ -60,7 +60,7 @@ If the merge reports conflicts, resolve them by reading the conflicted files and
 ```bash
 npm install
 npm run build
-npx vitest run src/channels/discord.test.ts
+npx vitest run tests/discord.test.ts
 ```
 
 All tests must pass (including the new Discord tests) and build must be clean before proceeding.

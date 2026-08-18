@@ -49,7 +49,7 @@ git merge gmail/main || {
 
 This merges in:
 - `src/channels/gmail.ts` (GmailChannel class with self-registration via `registerChannel`)
-- `src/channels/gmail.test.ts` (unit tests)
+- `tests/gmail.test.ts` (unit tests)
 - `import './gmail.js'` appended to the channel barrel file `src/channels/index.ts`
 - Gmail credentials mount (`~/.gmail-mcp`) in `src/container-runner.ts`
 - Gmail MCP server (`@gongrzhe/server-gmail-autoauth-mcp`) and `mcp__gmail__*` allowed tool in `container/agent-runner/src/index.ts`
@@ -72,7 +72,7 @@ When you receive an email notification (messages starting with `[Email from ...`
 ```bash
 npm install
 npm run build
-npx vitest run src/channels/gmail.test.ts
+npx vitest run tests/gmail.test.ts
 ```
 
 All tests must pass (including the new Gmail tests) and build must be clean before proceeding.
@@ -210,7 +210,7 @@ npx -y @gongrzhe/server-gmail-autoauth-mcp
 
 ### Channel mode
 
-1. Delete `src/channels/gmail.ts` and `src/channels/gmail.test.ts`
+1. Delete `src/channels/gmail.ts` and `tests/gmail.test.ts`
 2. Remove `import './gmail.js'` from `src/channels/index.ts`
 3. Remove `~/.gmail-mcp` mount from `src/container-runner.ts`
 4. Remove `gmail` MCP server and `mcp__gmail__*` from `container/agent-runner/src/index.ts`

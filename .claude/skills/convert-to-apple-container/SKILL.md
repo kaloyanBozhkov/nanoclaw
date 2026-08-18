@@ -70,7 +70,7 @@ git merge upstream/skill/apple-container
 
 This merges in:
 - `src/container-runtime.ts` — Apple Container implementation (replaces Docker)
-- `src/container-runtime.test.ts` — Apple Container-specific tests
+- `tests/container-runtime.test.ts` — Apple Container-specific tests
 - `src/container-runner.ts` — .env shadow mount fix and privilege dropping
 - `container/Dockerfile` — entrypoint that shadows .env via `mount --bind`
 - `container/build.sh` — default runtime set to `container`
@@ -169,7 +169,7 @@ Check directory permissions on the host. The container runs as uid 1000.
 | File | Type of Change |
 |------|----------------|
 | `src/container-runtime.ts` | Full replacement — Docker → Apple Container API |
-| `src/container-runtime.test.ts` | Full replacement — tests for Apple Container behavior |
+| `tests/container-runtime.test.ts` | Full replacement — tests for Apple Container behavior |
 | `src/container-runner.ts` | .env shadow mount removed, main containers start as root with privilege drop |
 | `container/Dockerfile` | Entrypoint: `mount --bind` for .env shadowing, `setpriv` privilege drop |
 | `container/build.sh` | Default runtime: `docker` → `container` |
