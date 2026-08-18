@@ -232,6 +232,7 @@ function nonEmptyPreview(files = 2, bytes = 32768) {
     targets: [
       {
         label: 'conversation history',
+        kind: 'session' as const,
         paths: ['/abs/a.jsonl'],
         entries: [{ path: '/abs/a.jsonl', display: 'data/a.jsonl', bytes }],
         files,
@@ -241,6 +242,28 @@ function nonEmptyPreview(files = 2, bytes = 32768) {
     files,
     bytes,
     empty: false,
+  };
+}
+
+function previewWithCache() {
+  const base = nonEmptyPreview();
+  return {
+    ...base,
+    targets: [
+      ...base.targets,
+      {
+        label: 'design-cache',
+        kind: 'cache' as const,
+        paths: ['/abs/design-cache'],
+        entries: [
+          { path: '/abs/design-cache/a.html', display: 'g/a.html', bytes: 900 },
+        ],
+        files: 1,
+        bytes: 900,
+      },
+    ],
+    files: base.files + 1,
+    bytes: base.bytes + 900,
   };
 }
 
@@ -311,7 +334,7 @@ describe('TelegramChannel /new confirmation', () => {
     const ctx = createCallbackCtx('new:yes');
     await runCallback(ctx);
 
-    expect(opts.onResetSession).toHaveBeenCalledWith('test-group');
+    expect(opts.onResetSession).toHaveBeenCalledWith('test-group', 'all');
     expect(ctx.editMessageText.mock.calls[0][0]).toContain('Cleared');
   });
 
@@ -423,6 +446,61 @@ describe('TelegramChannel /new confirmation', () => {
 
     expect(ctx.answerCallbackQuery).not.toHaveBeenCalled();
     expect(opts.onResetSession).not.toHaveBeenCalled();
+  });
+
+  describe('keeping caches', () => {
+    beforeEach(() => {
+      (opts.onPreviewReset as any).mockImplementation(
+        (_g: string, scope?: string) =>
+          scope === 'session' ? nonEmptyPreview() : previewWithCache(),
+      );
+    });
+
+    it('offers "Keep caches" only when a cache exists', async () => {
+      const ctx = createNewCommandCtx();
+      await runNewCommand(ctx);
+      expect(
+        ctx.reply.mock.calls[0][1].reply_markup.buttons.map((b: any) => b.data),
+      ).toEqual(['new:yes', 'new:session', 'new:no', 'new:list']);
+    });
+
+    it('omits it when conversation history is the only target', async () => {
+      (opts.onPreviewReset as any).mockReturnValue(nonEmptyPreview());
+      const ctx = createNewCommandCtx();
+      await runNewCommand(ctx);
+      expect(
+        ctx.reply.mock.calls[0][1].reply_markup.buttons.map((b: any) => b.data),
+      ).toEqual(['new:yes', 'new:no', 'new:list']);
+    });
+
+    it('resets session-only and says the caches survived', async () => {
+      await runNewCommand(createNewCommandCtx());
+      const ctx = createCallbackCtx('new:session');
+      await runCallback(ctx);
+
+      expect(opts.onResetSession).toHaveBeenCalledWith('test-group', 'session');
+      expect(ctx.editMessageText.mock.calls[0][0]).toContain('Caches kept');
+    });
+
+    it('clears everything on the full option', async () => {
+      await runNewCommand(createNewCommandCtx());
+      const ctx = createCallbackCtx('new:yes');
+      await runCallback(ctx);
+
+      expect(opts.onResetSession).toHaveBeenCalledWith('test-group', 'all');
+      expect(ctx.editMessageText.mock.calls[0][0]).not.toContain('Caches kept');
+    });
+
+    it('keeps the choice available after listing files', async () => {
+      await runNewCommand(createNewCommandCtx());
+      const ctx = createCallbackCtx('new:list');
+      await runCallback(ctx);
+      expect(
+        ctx.editMessageText.mock.calls[0][1].reply_markup.buttons.map(
+          (b: any) => b.data,
+        ),
+      ).toEqual(['new:yes', 'new:session', 'new:no']);
+    });
   });
 });
 

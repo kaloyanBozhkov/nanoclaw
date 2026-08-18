@@ -224,7 +224,7 @@ describe('credential-proxy', () => {
       );
     }
 
-    it('swaps an OAuth org key for that org\'s real token', async () => {
+    it("swaps an OAuth org key for that org's real token", async () => {
       const res = await callAs('nanoclaw:work');
       expect(res.statusCode).toBe(200);
       expect(lastUpstreamHeaders.authorization).toBe(

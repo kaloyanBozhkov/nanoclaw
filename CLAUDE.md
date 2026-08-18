@@ -15,6 +15,7 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `src/ipc.ts` | IPC watcher and task processing |
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
+| `src/godmode.ts` | Host terminal access (`/godmode`) — switch state + command execution |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations |

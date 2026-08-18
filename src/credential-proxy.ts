@@ -37,8 +37,10 @@ export interface ProxyConfig {
  * effect on the next container, not the next restart. Reads are cached against
  * the file's mtime so this isn't disk I/O on every API call.
  */
-let credentialCache: { mtimeMs: number; values: Record<string, string> } | null =
-  null;
+let credentialCache: {
+  mtimeMs: number;
+  values: Record<string, string>;
+} | null = null;
 
 function readOrgSecret(envKey: string): string | undefined {
   const envFile = path.join(process.cwd(), '.env');

@@ -122,6 +122,41 @@ describe('collectResetTargets', () => {
   });
 });
 
+describe('scope', () => {
+  beforeEach(() => {
+    write(sessionDir('-workspace-group', 'abc.jsonl'), 'x'.repeat(10));
+    write(groupDir('design-cache', 'a.html'), 'y'.repeat(90));
+  });
+
+  it('tags each target as session or cache', () => {
+    expect(collectResetTargets(GROUP).map((t) => [t.label, t.kind])).toEqual([
+      ['conversation history', 'session'],
+      ['design-cache', 'cache'],
+    ]);
+  });
+
+  it("'session' keeps caches out of the target list", () => {
+    const targets = collectResetTargets(GROUP, 'session');
+    expect(targets.map((t) => t.label)).toEqual(['conversation history']);
+    expect(previewReset(GROUP, 'session').bytes).toBe(10);
+  });
+
+  it("'all' is the default and includes caches", () => {
+    expect(previewReset(GROUP).bytes).toBe(100);
+    expect(previewReset(GROUP, 'all').bytes).toBe(100);
+  });
+
+  it('a session-scoped delete leaves the cache on disk', () => {
+    for (const target of collectResetTargets(GROUP, 'session')) {
+      for (const p of target.paths)
+        fs.rmSync(p, { recursive: true, force: true });
+    }
+    expect(fs.existsSync(groupDir('design-cache', 'a.html'))).toBe(true);
+    expect(previewReset(GROUP, 'session').empty).toBe(true);
+    expect(previewReset(GROUP).empty).toBe(false);
+  });
+});
+
 describe('previewReset totals', () => {
   it('sums files and bytes across targets', () => {
     write(sessionDir('-workspace-group', 'abc.jsonl'), 'x'.repeat(10));

@@ -152,6 +152,23 @@ containers receive a routing key, never a token. See
 | `nosleep` | Remove this chat's hard runtime cap, for long jobs. No leading slash. The idle timeout still applies. |
 | `yessleep` | Restore the default cap. |
 
+**Host terminal (godmode)**
+
+Off by default. While it is on, the agent can run shell commands on the host
+machine itself — as you, outside the container sandbox — instead of only inside
+its own Linux VM. Main chat only, and only the owner can flip it. The switch
+lives in `~/.config/nanoclaw/godmode.json`, outside the project root and never
+mounted into a container, so an agent cannot grant itself the capability; the
+host re-reads it per command, so turning it off revokes an agent that is
+already running. Every command and refusal is appended to
+`data/godmode-audit.jsonl`.
+
+| Command | What it does |
+|---|---|
+| `/godmode` | Show whether host terminal access is on, and when it last changed. |
+| `/godmode on` | Allow the agent to run commands on this machine. Owner only. |
+| `/godmode off` | Refuse them again, including from a container that is still running. Owner only. |
+
 **Pins**
 
 | Command | What it does |

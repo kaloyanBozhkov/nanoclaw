@@ -7,6 +7,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { handleHostExec } from './godmode.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { handleOpenHost } from './open-host.js';
@@ -257,6 +258,11 @@ export async function processTaskIpc(
     app?: string;
     url?: string;
     filePath?: string;
+    // For host_exec
+    requestId?: string;
+    command?: string;
+    cwd?: string;
+    timeoutMs?: number;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -571,6 +577,27 @@ export async function processTaskIpc(
           'open_host request rejected',
         );
       }
+      break;
+    }
+
+    case 'host_exec': {
+      // Terminal access on the user's own machine. Every gate lives on this
+      // side: `isMain` and the group folder come from the IPC directory the
+      // request arrived in, and godmode.ts re-reads the switch per request.
+      // Kicked off without awaiting — the IPC loop is serial, and a long build
+      // would otherwise stall every other group.
+      const groupEntry = Object.values(registeredGroups).find(
+        (g) => g.folder === sourceGroup,
+      );
+      handleHostExec({
+        requestId: data.requestId,
+        command: data.command,
+        cwd: data.cwd,
+        timeoutMs: data.timeoutMs,
+        groupFolder: sourceGroup,
+        isMain,
+        additionalMounts: groupEntry?.containerConfig?.additionalMounts,
+      });
       break;
     }
 

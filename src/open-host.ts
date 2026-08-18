@@ -122,7 +122,7 @@ function expandTilde(p: string): string {
  *
  * Returns null if the path can't be mapped to anything we trust.
  */
-function resolveContainerPath(
+export function resolveContainerPath(
   filePath: string,
   groupFolder: string | undefined,
   additionalMounts: AdditionalMount[] | undefined,

@@ -56,9 +56,14 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
+import { getGodModeStatus, setGodMode } from './godmode.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
-import { collectResetTargets, previewReset } from './session-reset.js';
+import {
+  collectResetTargets,
+  previewReset,
+  type ResetScope,
+} from './session-reset.js';
 import { addPin, formatPinList, listPins, removePin } from './pinned.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
@@ -937,6 +942,86 @@ async function main(): Promise<void> {
     );
   }
 
+  // "/godmode" (status), "/godmode on", "/godmode off" — host terminal access.
+  //
+  // Main chat only, and only the owner may flip it: while it is on, the agent
+  // can run commands on this Mac as the user, outside the container sandbox.
+  // The state file lives in ~/.config/nanoclaw and is re-read on every command
+  // the agent asks for, so "off" revokes a container that is already running.
+  async function handleGodModeCommand(
+    chatJid: string,
+    arg: string,
+    isOwner: boolean,
+    sender: string,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    if (!group.isMain) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ godmode is only available in the main chat.',
+      );
+      return;
+    }
+
+    const status = getGodModeStatus(group.folder);
+    const describe = () => {
+      const since = status.changedAt
+        ? ` since ${new Date(status.changedAt).toLocaleString('en-GB', { timeZone: TIMEZONE })}`
+        : '';
+      return status.enabled
+        ? `🔓 godmode is ON${since} — I can run terminal commands on this machine. Send /godmode off to revoke.`
+        : `🔒 godmode is OFF${since ? ` (last change${since})` : ''} — terminal commands on this machine are refused. Send /godmode on to allow them.`;
+    };
+
+    // No argument → report status. Anyone in the main chat may ask.
+    if (!arg) {
+      await channel.sendMessage(chatJid, describe());
+      return;
+    }
+
+    if (arg !== 'on' && arg !== 'off') {
+      await channel.sendMessage(
+        chatJid,
+        'Usage: /godmode (status), /godmode on, /godmode off.',
+      );
+      return;
+    }
+
+    if (!isOwner) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ Only the owner can change godmode.',
+      );
+      return;
+    }
+
+    const enabled = arg === 'on';
+    if (enabled === status.enabled) {
+      await channel.sendMessage(chatJid, `Already ${arg}. ${describe()}`);
+      return;
+    }
+
+    try {
+      setGodMode(group.folder, enabled, sender);
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to persist godmode state');
+      await channel.sendMessage(chatJid, '⚠️ Failed to save godmode setting.');
+      return;
+    }
+
+    await channel.sendMessage(
+      chatJid,
+      enabled
+        ? '🔓 godmode ON. I can now run terminal commands on this machine — as your user, outside the container sandbox, with whatever access you have. ' +
+            'Ask me in plain language ("check what\'s on port 3000", "restart the service") and I\'ll run it and report back. Send /godmode off when you\'re done.'
+        : '🔒 godmode OFF. Terminal commands on this machine are refused again, including from an agent that is still running.',
+    );
+  }
+
   // The model this chat's next container will run on: per-group override
   // (set via /model) or the global default.
   function currentModelId(chatJid: string): string {
@@ -1058,7 +1143,7 @@ async function main(): Promise<void> {
     // switching is meant to prevent. Org-scoped caches go with it.
     queue.closeStdin(chatJid);
     for (const target of collectResetTargets(group.folder)) {
-      if (target.label === 'conversation history') continue; // history is not org-scoped
+      if (target.kind !== 'cache') continue; // history is not identity-scoped
       for (const p of target.paths) {
         try {
           fs.rmSync(p, { recursive: true, force: true });
@@ -1306,6 +1391,19 @@ async function main(): Promise<void> {
         return;
       }
 
+      // /godmode [on|off] — host terminal access for the main chat.
+      // Intercepted before storage so it never reaches the agent: the switch
+      // must not be something a conversation can talk its way into.
+      const godMatch = /^\/godmode(?:@\S+)?\b(.*)$/i.exec(trimmed);
+      if (godMatch) {
+        const arg = godMatch[1].trim().toLowerCase();
+        const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
+        handleGodModeCommand(chatJid, arg, isOwner, msg.sender).catch((err) =>
+          logger.error({ err, chatJid }, 'Godmode command error'),
+        );
+        return;
+      }
+
       // /pin /unpin /pins / 📌 — pin management
       if (isPinCommand(trimmed)) {
         handlePinCommand(chatJid, trimmed).catch((err) =>
@@ -1339,7 +1437,7 @@ async function main(): Promise<void> {
       channel?: string,
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
-    onResetSession: (groupFolder: string) => {
+    onResetSession: (groupFolder: string, scope: ResetScope = 'all') => {
       deleteSession(groupFolder);
       delete sessions[groupFolder];
 
@@ -1356,7 +1454,7 @@ async function main(): Promise<void> {
       // list comes from the same collector the preview used, so the two can't
       // drift. Claude session files (UUID dirs/files, never memory/) plus any
       // derived group caches; container-runner.ts recreates .claude/ next run.
-      for (const target of collectResetTargets(groupFolder)) {
+      for (const target of collectResetTargets(groupFolder, scope)) {
         for (const p of target.paths) {
           try {
             fs.rmSync(p, { recursive: true, force: true });
@@ -1373,7 +1471,8 @@ async function main(): Promise<void> {
         );
       }
     },
-    onPreviewReset: (groupFolder: string) => previewReset(groupFolder),
+    onPreviewReset: (groupFolder: string, scope: ResetScope = 'all') =>
+      previewReset(groupFolder, scope),
     registeredGroups: () => registeredGroups,
   };
 

@@ -14,6 +14,7 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const RESULTS_DIR = path.join(IPC_DIR, 'results');
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
@@ -474,6 +475,147 @@ This is fire-and-forget: success means the request was queued, not that the app 
     };
   },
 );
+
+/**
+ * Host terminal access ("godmode"), main chat only.
+ *
+ * Registered only for the main group — every other group's request is refused
+ * host-side anyway, and a tool that can only fail is worse than no tool. The
+ * host re-checks both the group and the godmode switch on every call, so a
+ * container that started while godmode was on stops being able to run commands
+ * the moment the user turns it off.
+ *
+ * Unlike the other IPC tools this one is request/response: the host writes the
+ * outcome to /workspace/ipc/results/<id>.json, which we poll for below.
+ */
+if (isMain) {
+  const DEFAULT_TIMEOUT_S = 120;
+  const MAX_TIMEOUT_S = 600;
+  const POLL_MS = 250;
+  /** Slack over the command's own timeout: IPC pickup + the host's SIGKILL grace. */
+  const RESULT_SLACK_MS = 20_000;
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  server.tool(
+    'run_on_host',
+    `Run a shell command on the HOST machine — the user's own Mac, outside this container.
+
+Use this when the work has to happen where the user actually is: inspecting or restarting host services, reading files that were never mounted into the container, driving host-only CLIs, checking what is listening on a port, opening or building a project in its real location.
+
+Do NOT use it for anything the container can do itself. Your normal Bash tool runs inside this VM and is faster, safer, and unrestricted here — prefer it for editing mounted repos, running tests, installing packages, or anything under /workspace.
+
+GATING: the user must have turned on godmode (\`/godmode on\` in the main chat). If they haven't, this returns a refusal and nothing runs — relay that to them and ask them to enable it rather than trying to work around it.
+
+The command runs as the user with NO sandbox: it can read their files, reach their network, and change their system. Treat it the way you would treat typing into their terminal — say what you are about to run when it is consequential, avoid destructive commands unless the user asked for exactly that, and never chain something irreversible into a command that was supposed to be a check.
+
+Runs through the user's login shell, so shell syntax (pipes, redirects, &&, quoting) works. Output is captured and returned; anything past ~100k characters per stream is truncated. Nothing is interactive — a command that waits for input will just hit its timeout, so pass non-interactive flags (\`-y\`, \`--no-input\`) yourself.`,
+    {
+      command: z.string().describe('Shell command to run on the host, e.g. "lsof -i :3000" or "git -C ~/code/app status".'),
+      cwd: z
+        .string()
+        .optional()
+        .describe('Working directory on the host. Accepts a host path ("~/code/app"), or a container path this group has mounted (/workspace/group/..., /workspace/extra/<mount>/...) which is translated to its host location. Defaults to the NanoClaw project root.'),
+      timeout_seconds: z
+        .number()
+        .optional()
+        .describe(`Wall-clock limit for the command. Default ${DEFAULT_TIMEOUT_S}s, max ${MAX_TIMEOUT_S}s.`),
+    },
+    async (args) => {
+      const timeoutS = Math.min(
+        Math.max(args.timeout_seconds ?? DEFAULT_TIMEOUT_S, 1),
+        MAX_TIMEOUT_S,
+      );
+      const requestId = `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      writeIpcFile(TASKS_DIR, {
+        type: 'host_exec',
+        requestId,
+        command: args.command,
+        cwd: args.cwd,
+        timeoutMs: timeoutS * 1000,
+        groupFolder,
+        timestamp: new Date().toISOString(),
+      });
+
+      const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+      const deadline = Date.now() + timeoutS * 1000 + RESULT_SLACK_MS;
+
+      let raw: string | null = null;
+      while (Date.now() < deadline) {
+        await sleep(POLL_MS);
+        try {
+          raw = fs.readFileSync(resultPath, 'utf-8');
+          break;
+        } catch {
+          // Not written yet — the host writes it atomically when the command exits.
+        }
+      }
+
+      if (raw === null) {
+        return {
+          content: [{ type: 'text' as const, text: `No result from the host after ${timeoutS}s. The host may be busy or the command may still be running; do not assume it failed — check with a follow-up command before retrying anything with side effects.` }],
+          isError: true,
+        };
+      }
+
+      try {
+        fs.unlinkSync(resultPath);
+      } catch {
+        // Host sweeps stale results; a leftover file is harmless.
+      }
+
+      let result: {
+        ok: boolean;
+        exitCode: number | null;
+        stdout: string;
+        stderr: string;
+        truncated: boolean;
+        timedOut: boolean;
+        durationMs: number;
+        cwd?: string;
+        error?: string;
+      };
+      try {
+        result = JSON.parse(raw);
+      } catch {
+        return {
+          content: [{ type: 'text' as const, text: 'The host wrote an unreadable result file.' }],
+          isError: true,
+        };
+      }
+
+      if (result.error && result.exitCode === null && !result.timedOut) {
+        // Refused (godmode off, non-main chat, bad cwd) — nothing ran.
+        return {
+          content: [{ type: 'text' as const, text: `Refused by host: ${result.error}` }],
+          isError: true,
+        };
+      }
+
+      const header = [
+        `exit ${result.exitCode ?? 'n/a'}`,
+        `${(result.durationMs / 1000).toFixed(1)}s`,
+        result.cwd ? `cwd ${result.cwd}` : null,
+        result.timedOut ? 'TIMED OUT' : null,
+        result.truncated ? 'OUTPUT TRUNCATED' : null,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+      const body = [
+        header,
+        result.stdout ? `--- stdout ---\n${result.stdout}` : '--- stdout --- (empty)',
+        result.stderr ? `--- stderr ---\n${result.stderr}` : null,
+        result.error && result.timedOut ? `--- note ---\n${result.error}` : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      return { content: [{ type: 'text' as const, text: body }], isError: !result.ok };
+    },
+  );
+}
 
 // Start the stdio transport
 const transport = new StdioServerTransport();

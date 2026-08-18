@@ -19,9 +19,22 @@ export interface ResetFile {
   bytes: number;
 }
 
+/**
+ * What a target represents.
+ *
+ * `session` is the conversation itself. `cache` is derived data that only costs
+ * time to rebuild — a Claude Design mirror re-pulls tens of thousands of
+ * characters — so a reset can keep it.
+ */
+export type ResetKind = 'session' | 'cache';
+
+/** Which targets an operation acts on. */
+export type ResetScope = 'all' | 'session';
+
 export interface ResetTarget {
   /** Human label for the chat summary. */
   label: string;
+  kind: ResetKind;
   /** Absolute paths removed when the reset runs. */
   paths: string[];
   /** Every file under those paths, collected during the same walk. */
@@ -77,12 +90,17 @@ function walkFiles(target: string): ResetFile[] {
   return out;
 }
 
-function makeTarget(label: string, paths: string[]): ResetTarget | null {
+function makeTarget(
+  label: string,
+  kind: ResetKind,
+  paths: string[],
+): ResetTarget | null {
   const present = paths.filter((p) => fs.existsSync(p));
   if (present.length === 0) return null;
   const entries = present.flatMap(walkFiles);
   return {
     label,
+    kind,
     paths: present,
     entries,
     files: entries.length,
@@ -98,7 +116,10 @@ function makeTarget(label: string, paths: string[]): ResetTarget | null {
  * listed in EPHEMERAL_GROUP_DIRS. Authored work — design briefs, memory — is
  * never a target.
  */
-export function collectResetTargets(groupFolder: string): ResetTarget[] {
+export function collectResetTargets(
+  groupFolder: string,
+  scope: ResetScope = 'all',
+): ResetTarget[] {
   const targets: ResetTarget[] = [];
 
   const projectsDir = path.join(
@@ -123,13 +144,17 @@ export function collectResetTargets(groupFolder: string): ResetTarget[] {
   } catch {
     // Unreadable session dir — report nothing rather than guessing.
   }
-  const sessionTarget = makeTarget('conversation history', sessionPaths);
+  const sessionTarget = makeTarget(
+    'conversation history',
+    'session',
+    sessionPaths,
+  );
   if (sessionTarget) targets.push(sessionTarget);
 
   try {
     const groupPath = resolveGroupFolderPath(groupFolder);
     for (const dirName of EPHEMERAL_GROUP_DIRS) {
-      const t = makeTarget(dirName, [path.join(groupPath, dirName)]);
+      const t = makeTarget(dirName, 'cache', [path.join(groupPath, dirName)]);
       if (t) targets.push(t);
     }
   } catch {
@@ -137,11 +162,16 @@ export function collectResetTargets(groupFolder: string): ResetTarget[] {
     // the reset path will reject it identically. Nothing to preview.
   }
 
-  return targets;
+  return scope === 'session'
+    ? targets.filter((t) => t.kind === 'session')
+    : targets;
 }
 
-export function previewReset(groupFolder: string): ResetPreview {
-  const targets = collectResetTargets(groupFolder);
+export function previewReset(
+  groupFolder: string,
+  scope: ResetScope = 'all',
+): ResetPreview {
+  const targets = collectResetTargets(groupFolder, scope);
   const files = targets.reduce((n, t) => n + t.files, 0);
   const bytes = targets.reduce((n, t) => n + t.bytes, 0);
   return { targets, files, bytes, empty: targets.length === 0 };

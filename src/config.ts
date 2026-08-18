@@ -52,6 +52,15 @@ export const OPEN_ALLOWLIST_PATH = path.join(
   'nanoclaw',
   'open-allowlist.json',
 );
+// Godmode switch: which groups may run terminal commands on the host. Stored
+// with the allowlists above — outside the project root, never mounted into a
+// container — so an agent cannot grant itself the capability. See godmode.ts.
+export const GODMODE_STATE_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'godmode.json',
+);
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
@@ -204,7 +213,9 @@ const ORG_ENV_PREFIX = 'ANTHROPIC_ORG_';
 
 /** The org a chat uses when it has never switched. */
 export const DEFAULT_ORG_NAME =
-  process.env.ANTHROPIC_DEFAULT_ORG || envConfig.ANTHROPIC_DEFAULT_ORG || 'default';
+  process.env.ANTHROPIC_DEFAULT_ORG ||
+  envConfig.ANTHROPIC_DEFAULT_ORG ||
+  'default';
 
 export interface AnthropicOrg {
   /** Lowercase handle used in chat and as the proxy routing key. */

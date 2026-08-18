@@ -1,4 +1,4 @@
-import { ResetPreview } from '../session-reset.js';
+import { ResetPreview, ResetScope } from '../session-reset.js';
 import {
   Channel,
   OnInboundMessage,
@@ -9,9 +9,9 @@ import {
 export interface ChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
-  onResetSession: (groupFolder: string) => void;
+  onResetSession: (groupFolder: string, scope?: ResetScope) => void;
   /** What `onResetSession` would delete, for a confirmation prompt. */
-  onPreviewReset: (groupFolder: string) => ResetPreview;
+  onPreviewReset: (groupFolder: string, scope?: ResetScope) => ResetPreview;
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 

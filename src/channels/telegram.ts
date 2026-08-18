@@ -21,6 +21,7 @@ import {
   formatResetFileList,
   formatResetPreview,
   ResetPreview,
+  ResetScope,
   TELEGRAM_MAX_CHARS,
 } from '../session-reset.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -152,8 +153,8 @@ function mediaKindFor(filePath: string): MediaKind {
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
-  onResetSession: (groupFolder: string) => void;
-  onPreviewReset: (groupFolder: string) => ResetPreview;
+  onResetSession: (groupFolder: string, scope?: ResetScope) => void;
+  onPreviewReset: (groupFolder: string, scope?: ResetScope) => ResetPreview;
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
@@ -229,6 +230,31 @@ async function safeAnswer(
   } catch (err) {
     logger.debug(describeTelegramError(err), 'answerCallbackQuery failed');
   }
+}
+
+/**
+ * Buttons for the `/new` prompt.
+ *
+ * "Keep caches" only appears when there is a cache to keep — offering it when
+ * the only target is conversation history would present two buttons that do
+ * exactly the same thing.
+ */
+function resetKeyboard(
+  preview: ResetPreview,
+  withList: boolean,
+): InlineKeyboard {
+  const hasCache = preview.targets.some((t) => t.kind === 'cache');
+  const kb = new InlineKeyboard();
+
+  if (hasCache) {
+    kb.text('Clear everything', 'new:yes').text('Keep caches', 'new:session');
+    kb.row().text('Cancel', 'new:no');
+  } else {
+    kb.text('Yes, clear it', 'new:yes').text('Cancel', 'new:no');
+  }
+
+  if (withList) kb.row().text('List files', 'new:list');
+  return kb;
 }
 
 /** How long a pending `/new` confirmation stays answerable. */
@@ -334,18 +360,19 @@ export class TelegramChannel implements Channel {
       });
 
       await ctx.reply(formatResetPreview(preview), {
-        reply_markup: new InlineKeyboard()
-          .text('Yes, clear it', 'new:yes')
-          .text('Cancel', 'new:no')
-          .row()
-          .text('List files', 'new:list'),
+        reply_markup: resetKeyboard(preview, true),
       });
     });
 
     // Answer to the /new confirmation above.
     this.bot.on('callback_query:data', async (ctx) => {
       const data = ctx.callbackQuery.data;
-      if (data !== 'new:yes' && data !== 'new:no' && data !== 'new:list') {
+      if (
+        data !== 'new:yes' &&
+        data !== 'new:session' &&
+        data !== 'new:no' &&
+        data !== 'new:list'
+      ) {
         return;
       }
 
@@ -375,9 +402,7 @@ export class TelegramChannel implements Channel {
           const listed = this.opts.onPreviewReset(pending.groupFolder);
           await safeAnswer(ctx);
           await editOrReply(ctx, formatResetFileList(listed), {
-            reply_markup: new InlineKeyboard()
-              .text('Yes, clear it', 'new:yes')
-              .text('Cancel', 'new:no'),
+            reply_markup: resetKeyboard(listed, false),
           });
           return;
         }
@@ -390,14 +415,19 @@ export class TelegramChannel implements Channel {
           return;
         }
 
+        // "Keep caches" clears the conversation but leaves derived data that
+        // only costs time to rebuild.
+        const scope: ResetScope = data === 'new:session' ? 'session' : 'all';
+
         // Re-read now: the container has been running since the prompt was
         // shown, so report what actually goes rather than the stale preview.
-        const preview = this.opts.onPreviewReset(pending.groupFolder);
-        this.opts.onResetSession(pending.groupFolder);
+        const preview = this.opts.onPreviewReset(pending.groupFolder, scope);
+        this.opts.onResetSession(pending.groupFolder, scope);
         logger.info(
           {
             chatJid,
             group: pending.groupFolder,
+            scope,
             files: preview.files,
             bytes: preview.bytes,
           },
@@ -406,10 +436,12 @@ export class TelegramChannel implements Channel {
         // Deletion already happened — the confirmation text is cosmetic, so a
         // failure here must not read as "the reset failed".
         await safeAnswer(ctx, 'Cleared.');
+        const kept = scope === 'session' ? ' Caches kept.' : '';
         await editOrReply(
           ctx,
           `Cleared ${preview.files} file${preview.files === 1 ? '' : 's'} ` +
-            `(${formatBytes(preview.bytes)}). Next message starts a fresh conversation.`,
+            `(${formatBytes(preview.bytes)}).${kept} ` +
+            'Next message starts a fresh conversation.',
         );
       } catch (err) {
         logger.error(
