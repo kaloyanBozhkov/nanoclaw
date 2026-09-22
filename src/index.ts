@@ -9,6 +9,7 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  DEFAULT_ORG_NAME,
   EPHEMERAL_GROUP_DIRS,
   IDLE_TIMEOUT,
   isOwnerSender,
@@ -56,6 +57,18 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
+import {
+  formatConsumablesMenu,
+  getConsumed,
+  listConsumables,
+  readConsumable,
+  recordConsumed,
+  resolveConsumable,
+  wrapConsumable,
+  approxTokens,
+} from './consumables.js';
+import { logDesignAccessStatus } from './design-probe.js';
+import { startLogRotation } from './log-rotate.js';
 import { getGodModeStatus, setGodMode } from './godmode.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
@@ -104,6 +117,13 @@ const sessionResetAt: Record<string, number> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+/**
+ * Consumables requested with /consume while no container was live, keyed by
+ * chat JID. Prepended to the next run's prompt so the document still lands —
+ * the alternative, refusing unless an agent happens to be running, makes the
+ * command useless at the start of a session.
+ */
+const pendingConsumables: Record<string, string[]> = {};
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -215,7 +235,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const queuedDocs = pendingConsumables[chatJid] ?? [];
+  delete pendingConsumables[chatJid];
+  const prompt = [...queuedDocs, formatMessages(missedMessages, TIMEZONE)].join(
+    '\n\n',
+  );
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -854,6 +878,15 @@ async function main(): Promise<void> {
     PROXY_BIND_HOST,
   );
 
+  // Keep the launchd service log bounded — nothing else does, and an
+  // unbounded log on a full disk is how this service last went down.
+  startLogRotation();
+
+  // Ask once whether this identity can actually reach Claude Design. A missing
+  // scope surfaces in containers only as an absent mcp__design__*, which reads
+  // as "not installed" and sends the agent chasing browser workarounds.
+  void logDesignAccessStatus(DEFAULT_ORG_NAME);
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
@@ -1352,6 +1385,100 @@ async function main(): Promise<void> {
     return false;
   }
 
+  // /consume <name>, /consume, /consumables, /consumed — load a reference
+  // document into the running agent's context. Main only: non-main groups
+  // already get groups/global/CLAUDE.md in their system prompt, so there is
+  // nothing for them to consume. Intercepted before storage.
+  //
+  // The bare forms all print the same menu (available + what's loaded) rather
+  // than splitting "what can I load" and "what did I load" across two
+  // near-identical command names.
+  async function handleConsumeCommand(
+    chatJid: string,
+    rawText: string,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    if (!group.isMain) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ /consume is only available in the main chat — other groups already load the agent roster automatically.',
+      );
+      return;
+    }
+
+    const sessionId = sessions[group.folder] ?? '';
+    const items = listConsumables();
+    const consumed = getConsumed(group.folder, sessionId);
+
+    const text = rawText.trim();
+    const arg = /^\/consume\s+/i.test(text)
+      ? text.replace(/^\/consume\s+/i, '').trim()
+      : '';
+
+    if (!arg) {
+      await channel.sendMessage(
+        chatJid,
+        formatConsumablesMenu(items, consumed),
+      );
+      return;
+    }
+
+    const match = resolveConsumable(arg);
+    if (!match) {
+      await channel.sendMessage(
+        chatJid,
+        formatConsumablesMenu(items, consumed, `No match for *${arg}*.`),
+      );
+      return;
+    }
+
+    let body: string;
+    try {
+      body = readConsumable(match);
+    } catch (err) {
+      logger.error({ err, slug: match.slug }, 'Failed to read consumable');
+      await channel.sendMessage(
+        chatJid,
+        `⚠️ Could not read ${match.relPath}.`,
+      );
+      return;
+    }
+
+    const payload = wrapConsumable(match, body);
+    const delivered = queue.sendMessage(chatJid, payload);
+    if (!delivered) {
+      (pendingConsumables[chatJid] ??= []).push(payload);
+    }
+    recordConsumed(group.folder, sessionId, match, body.length);
+
+    logger.info(
+      { group: group.name, slug: match.slug, bytes: body.length, delivered },
+      'Consumed document',
+    );
+
+    const size = `${approxTokens(body.length)} tokens`;
+    await channel.sendMessage(
+      chatJid,
+      delivered
+        ? `🍽️ Consumed *${match.label}* — ${size}.`
+        : `🍽️ Queued *${match.label}* — ${size}. No agent is running; it loads on the next message.`,
+    );
+  }
+
+  function isConsumeCommand(text: string): boolean {
+    const t = text.trim().toLowerCase();
+    return (
+      t === '/consume' ||
+      t === '/consumables' ||
+      t === '/consumed' ||
+      /^\/consume\s+\S/.test(t)
+    );
+  }
+
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
@@ -1440,6 +1567,14 @@ async function main(): Promise<void> {
       if (isPinCommand(trimmed)) {
         handlePinCommand(chatJid, trimmed).catch((err) =>
           logger.error({ err, chatJid }, 'Pin command error'),
+        );
+        return;
+      }
+
+      // /consume /consumables /consumed — reference docs for the main chat
+      if (isConsumeCommand(trimmed)) {
+        handleConsumeCommand(chatJid, trimmed).catch((err) =>
+          logger.error({ err, chatJid }, 'Consume command error'),
         );
         return;
       }

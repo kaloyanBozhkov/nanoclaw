@@ -63,6 +63,7 @@ export const GODMODE_STATE_PATH = path.join(
 );
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
+export const RULES_DIR = path.resolve(PROJECT_ROOT, 'rules');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
 // Directories inside a group folder holding derived, re-fetchable data.
@@ -124,9 +125,9 @@ export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 // Model the container agent runs on. Override via ANTHROPIC_MODEL in .env;
-// defaults to the latest Claude Fable. Passed to the SDK as a container env var.
+// defaults to Claude Opus 5.5. Passed to the SDK as a container env var.
 export const AGENT_MODEL =
-  process.env.ANTHROPIC_MODEL || envConfig.ANTHROPIC_MODEL || 'claude-fable-5';
+  process.env.ANTHROPIC_MODEL || envConfig.ANTHROPIC_MODEL || 'claude-opus-5-5';
 
 // Sender IDs treated as the owner for privileged chat commands (e.g. switching
 // the model). Comma-separated in OWNER_IDS. For Telegram this is the numeric
@@ -154,15 +155,21 @@ export interface ModelChoice {
 }
 
 export const AVAILABLE_MODELS: ModelChoice[] = [
-  { alias: 'opus', id: 'claude-opus-4-8', label: 'Opus 4.8' },
-  {
-    alias: 'opus-1m',
-    id: 'claude-opus-4-8[1m]',
-    label: 'Opus 4.8 (1M context)',
-  },
-  { alias: 'fable', id: 'claude-fable-5', label: 'Fable 5' },
-  { alias: 'sonnet', id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  // Current generation first — bare "opus"/"fable"/"sonnet"/"haiku" always
+  // resolve to the newest. Previous generations stay selectable by explicit
+  // alias for rollback. Verified against GET /v1/models on 2026-09-22.
+  { alias: 'opus', id: 'claude-opus-5-5', label: 'Opus 5.5' },
+  { alias: 'fable', id: 'claude-fable-5-1', label: 'Fable 5.1' },
+  { alias: 'sonnet', id: 'claude-sonnet-5', label: 'Sonnet 5' },
   { alias: 'haiku', id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+  { alias: 'opus-5', id: 'claude-opus-5', label: 'Opus 5 (previous)' },
+  { alias: 'opus-4.8', id: 'claude-opus-4-8', label: 'Opus 4.8 (previous)' },
+  { alias: 'fable-5', id: 'claude-fable-5', label: 'Fable 5 (previous)' },
+  {
+    alias: 'sonnet-4.6',
+    id: 'claude-sonnet-4-6',
+    label: 'Sonnet 4.6 (previous)',
+  },
 ];
 
 /**

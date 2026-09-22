@@ -22,6 +22,10 @@ import {
   resolveGroupOrg,
 } from './config.js';
 import { readEnvFile, readEnvPrefixed } from './env.js';
+import {
+  getDesignCredential,
+  isDesignRequest,
+} from './design-credential.js';
 import { logger } from './logger.js';
 
 export type { AuthMode };
@@ -115,6 +119,27 @@ export function startCredentialProxy(
         delete headers['keep-alive'];
         delete headers['transfer-encoding'];
 
+        // Claude Design is authenticated by its own credential, stored by
+        // /design-login beside the main login — the long-lived .env token is
+        // minted without design scopes and always 403s here. Design access is
+        // per claude.ai login, not per org, so this path deliberately ignores
+        // the routing key rather than varying with /switch.
+        let designHandled = false;
+        if (isDesignRequest(req.url)) {
+          const design = getDesignCredential();
+          if (design) {
+            delete headers['authorization'];
+            delete headers['x-api-key'];
+            headers['authorization'] = `Bearer ${design.accessToken}`;
+            designHandled = true;
+          } else {
+            logger.warn(
+              { url: req.url },
+              'Claude Design request with no design credential — run /design-login in Claude Code',
+            );
+          }
+        }
+
         // Which identity is this container running as? The container never
         // holds a real credential — it sends the routing key `nanoclaw:<org>`
         // in whichever header its auth mode uses, and we swap in the secret.
@@ -123,9 +148,10 @@ export function startCredentialProxy(
         // temp API key Anthropic mints in response is already scoped to that
         // org, so every later request routes itself and passes through here
         // untouched.
-        const routingKey =
-          parseOrgPlaceholder(String(headers['authorization'] ?? '')) ??
-          parseOrgPlaceholder(String(headers['x-api-key'] ?? ''));
+        const routingKey = designHandled
+          ? null
+          : (parseOrgPlaceholder(String(headers['authorization'] ?? '')) ??
+            parseOrgPlaceholder(String(headers['x-api-key'] ?? '')));
 
         if (routingKey) {
           const org = resolveGroupOrg(routingKey);
@@ -162,7 +188,7 @@ export function startCredentialProxy(
           } else {
             headers['authorization'] = `Bearer ${secret}`;
           }
-        } else if (authMode === 'api-key' && headers['x-api-key']) {
+        } else if (!designHandled && authMode === 'api-key' && headers['x-api-key']) {
           // Legacy path: a container that predates per-identity routing sends
           // the literal "placeholder". Warn — after the routing key landed,
           // reaching here means some caller hardcoded a credential header and
@@ -170,7 +196,7 @@ export function startCredentialProxy(
           logLegacyInjection(String(headers['x-api-key']), req.url);
           delete headers['x-api-key'];
           headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
-        } else if (authMode === 'oauth' && headers['authorization']) {
+        } else if (!designHandled && authMode === 'oauth' && headers['authorization']) {
           logLegacyInjection(String(headers['authorization']), req.url);
           const legacyToken =
             secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN;

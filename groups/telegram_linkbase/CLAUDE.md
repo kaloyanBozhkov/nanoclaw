@@ -193,7 +193,7 @@ ESLint 9 with flat config (`eslint.config.js` at root):
 ## AI agent rules
 - never handle translations of locales. Just handle adding any english keys in the right json file.
 - **Dependencies:** this container has its own Linux `node_modules` (a Docker volume), materialized from the repo's `pnpm-lock.yaml`. Any `pnpm run` script auto-installs first when the lockfile changed — a few seconds, normal. Installing or adding packages is allowed: binaries land only in the container's tree, while `package.json`/`pnpm-lock.yaml` edits land in the real repo — treat those like code changes (visible in git, mention them in chat). Never `rm -rf` a `node_modules` directory itself — they're mount points here (clearing their *contents* is fine).
-- **Prisma:** `pnpm db:generate` is fine — engines are per-platform and additive (a Linux engine lands beside Kaloyan's darwin one without breaking it).
+- **Prisma:** `pnpm db:generate` is fine — engines are per-platform and additive (a Linux engine lands beside the owner's darwin one without breaking it).
 - **Local full builds are not the build gate — CI is.** iOS can't build on Linux; for the real signal rely on the GitHub Actions run on `main`. `pnpm type-check` and `pnpm lint` locally are fine and expected.
 
 ## Designs

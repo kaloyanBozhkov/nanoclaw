@@ -813,18 +813,23 @@ export async function runContainerAgent(
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
         const timeoutLog = path.join(logsDir, `container-${ts}.log`);
-        fs.writeFileSync(
-          timeoutLog,
-          [
-            `=== Container Run Log (TIMEOUT) ===`,
-            `Timestamp: ${new Date().toISOString()}`,
-            `Group: ${group.name}`,
-            `Container: ${containerName}`,
-            `Duration: ${duration}ms`,
-            `Exit Code: ${code}`,
-            `Had Streaming Output: ${hadStreamingOutput}`,
-          ].join('\n'),
-        );
+        // Best-effort, same uncatchable context as the run log below.
+        try {
+          fs.writeFileSync(
+            timeoutLog,
+            [
+              `=== Container Run Log (TIMEOUT) ===`,
+              `Timestamp: ${new Date().toISOString()}`,
+              `Group: ${group.name}`,
+              `Container: ${containerName}`,
+              `Duration: ${duration}ms`,
+              `Exit Code: ${code}`,
+              `Had Streaming Output: ${hadStreamingOutput}`,
+            ].join('\n'),
+          );
+        } catch (err) {
+          logger.warn({ err, timeoutLog }, 'Could not write timeout log');
+        }
 
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
@@ -912,8 +917,17 @@ export async function runContainerAgent(
         );
       }
 
-      fs.writeFileSync(logFile, logLines.join('\n'));
-      logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
+      // Best-effort: this runs inside container.on('close'), where a throw is
+      // uncatchable and logger.ts's uncaughtException handler calls
+      // process.exit(1). A full disk once took the whole service down here —
+      // a diagnostic nobody reads unless something already broke must never be
+      // able to stop the agents from running.
+      try {
+        fs.writeFileSync(logFile, logLines.join('\n'));
+        logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
+      } catch (err) {
+        logger.warn({ err, logFile }, 'Could not write container run log');
+      }
 
       if (code !== 0) {
         logger.error(
@@ -1039,7 +1053,12 @@ export function writeTasksSnapshot(
     : tasks.filter((t) => t.groupFolder === groupFolder);
 
   const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
-  fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
+  // Best-effort snapshot the container reads; never worth crashing over.
+  try {
+    fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
+  } catch (err) {
+    logger.warn({ err, tasksFile }, 'Could not write tasks snapshot');
+  }
 }
 
 export interface AvailableGroup {
@@ -1067,15 +1086,17 @@ export function writeGroupsSnapshot(
   const visibleGroups = isMain ? groups : [];
 
   const groupsFile = path.join(groupIpcDir, 'available_groups.json');
-  fs.writeFileSync(
-    groupsFile,
-    JSON.stringify(
-      {
-        groups: visibleGroups,
-        lastSync: new Date().toISOString(),
-      },
-      null,
-      2,
-    ),
-  );
+  // Best-effort snapshot the container reads; never worth crashing over.
+  try {
+    fs.writeFileSync(
+      groupsFile,
+      JSON.stringify(
+        { groups: visibleGroups, lastSync: new Date().toISOString() },
+        null,
+        2,
+      ),
+    );
+  } catch (err) {
+    logger.warn({ err, groupsFile }, 'Could not write groups snapshot');
+  }
 }
