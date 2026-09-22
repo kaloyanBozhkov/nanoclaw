@@ -16,11 +16,13 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
 | `src/godmode.ts` | Host terminal access (`/godmode`) — switch state + command execution |
+| `src/simulator.ts` | iOS Simulator access via Maestro (`/simulator`) — per-group switch + fixed actions |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
 | `container/skills/agent-browser.md` | Browser automation tool (available to all agents via Bash) |
+| `container/skills/ios-simulator/SKILL.md` | iOS Simulator skill (uses the `ios_simulator` MCP tool) |
 
 ## Skills
 

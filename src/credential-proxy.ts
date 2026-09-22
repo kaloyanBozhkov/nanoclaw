@@ -22,10 +22,7 @@ import {
   resolveGroupOrg,
 } from './config.js';
 import { readEnvFile, readEnvPrefixed } from './env.js';
-import {
-  getDesignCredential,
-  isDesignRequest,
-} from './design-credential.js';
+import { getDesignCredential, isDesignRequest } from './design-credential.js';
 import { logger } from './logger.js';
 
 export type { AuthMode };
@@ -188,7 +185,11 @@ export function startCredentialProxy(
           } else {
             headers['authorization'] = `Bearer ${secret}`;
           }
-        } else if (!designHandled && authMode === 'api-key' && headers['x-api-key']) {
+        } else if (
+          !designHandled &&
+          authMode === 'api-key' &&
+          headers['x-api-key']
+        ) {
           // Legacy path: a container that predates per-identity routing sends
           // the literal "placeholder". Warn — after the routing key landed,
           // reaching here means some caller hardcoded a credential header and
@@ -196,7 +197,11 @@ export function startCredentialProxy(
           logLegacyInjection(String(headers['x-api-key']), req.url);
           delete headers['x-api-key'];
           headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
-        } else if (!designHandled && authMode === 'oauth' && headers['authorization']) {
+        } else if (
+          !designHandled &&
+          authMode === 'oauth' &&
+          headers['authorization']
+        ) {
           logLegacyInjection(String(headers['authorization']), req.url);
           const legacyToken =
             secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN;

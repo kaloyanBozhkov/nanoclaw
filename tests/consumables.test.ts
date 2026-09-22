@@ -150,7 +150,11 @@ describe('menu', () => {
   });
 
   it('carries a notice for an unmatched name', () => {
-    const menu = formatConsumablesMenu(listConsumables(), [], 'No match for *xyz*.');
+    const menu = formatConsumablesMenu(
+      listConsumables(),
+      [],
+      'No match for *xyz*.',
+    );
     expect(menu.startsWith('No match for *xyz*.')).toBe(true);
   });
 

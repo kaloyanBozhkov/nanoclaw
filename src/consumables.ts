@@ -85,7 +85,9 @@ export function listConsumables(): Consumable[] {
   for (const dir of sourceDirs()) {
     let files: string[];
     try {
-      files = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.md'));
+      files = fs
+        .readdirSync(dir)
+        .filter((f) => f.toLowerCase().endsWith('.md'));
     } catch {
       continue; // Directory missing — nothing to offer from it.
     }
@@ -269,7 +271,9 @@ export function recordConsumed(
 
 function approxTokens(bytes: number): string {
   const tokens = bytes / 4;
-  return tokens >= 1000 ? `~${Math.round(tokens / 1000)}K` : `~${Math.round(tokens)}`;
+  return tokens >= 1000
+    ? `~${Math.round(tokens / 1000)}K`
+    : `~${Math.round(tokens)}`;
 }
 
 function shortTime(iso: string): string {
@@ -299,7 +303,9 @@ export function formatConsumablesMenu(
   lines.push('🍽️ *Consumables* — this session', '');
 
   if (items.length === 0) {
-    lines.push('Nothing available — no markdown found in rules/ or groups/global/.');
+    lines.push(
+      'Nothing available — no markdown found in rules/ or groups/global/.',
+    );
     return lines.join('\n');
   }
 
@@ -322,7 +328,9 @@ export function formatConsumablesMenu(
 
   lines.push('', 'Send /consume <name> to load one.');
   if (consumed.length > 0) {
-    lines.push('Re-consume after /compact — consumed text lives in the conversation.');
+    lines.push(
+      'Re-consume after /compact — consumed text lives in the conversation.',
+    );
   }
   return lines.join('\n');
 }

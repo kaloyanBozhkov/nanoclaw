@@ -114,7 +114,12 @@ export async function logDesignAccessStatus(orgName: string): Promise<void> {
       return;
     }
     logger.warn(
-      { org: orgName, status: result.status, code: result.code, hint: result.hint },
+      {
+        org: orgName,
+        status: result.status,
+        code: result.code,
+        hint: result.hint,
+      },
       'Claude Design UNAVAILABLE — mcp__design__* will be absent in containers',
     );
   } catch (err) {

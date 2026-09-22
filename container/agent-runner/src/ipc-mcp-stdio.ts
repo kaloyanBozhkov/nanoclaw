@@ -617,6 +617,162 @@ Runs through the user's login shell, so shell syntax (pipes, redirects, &&, quot
   );
 }
 
+/**
+ * iOS Simulator via Maestro — any group, gated per chat by `/simulator on`.
+ *
+ * Request/response like run_on_host: the host runs a fixed action against the
+ * simulator on the user's Mac and writes the result to /workspace/ipc/results.
+ * Output lands in /workspace/group/maestro/ so screenshots can be viewed with
+ * the Read tool and sent with send_image without any copying.
+ */
+{
+  const DEFAULT_TIMEOUT_S = 120;
+  const MAX_TIMEOUT_S = 600;
+  const POLL_MS = 250;
+  const RESULT_SLACK_MS = 20_000;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  server.tool(
+    'ios_simulator',
+    `Drive the iOS Simulator running on the user's Mac, through Maestro. Use it to look at, tap through, and screenshot a mobile app the same way agent-browser drives a web page.
+
+Actions:
+- "hierarchy": dump the current screen's accessibility tree as JSON (element text, labels, bounds). Do this FIRST to learn what is on screen — it is cheaper and more reliable than reading a screenshot.
+- "screenshot": save a PNG of the current screen to /workspace/group/maestro/<name>.png. View it with Read, or hand the path to send_image.
+- "run_flow": run a Maestro flow written as inline YAML (flow_yaml). Every action in one flow is one host round-trip, so batch: launch, tap, type, assert, screenshot. Screenshots taken inside a flow (takeScreenshot: <name>) land under /workspace/group/maestro/runs/<id>/ and are listed in the result.
+- "list_devices": list available simulators with their UDIDs and state. Only needed when the default (the booted device) is not what you want.
+
+Flow YAML essentials (maestro.dev docs for more):
+  appId: com.example.app        # header, then "---"
+  ---
+  - launchApp
+  - tapOn: "Sign in"            # by visible text / accessibility label
+  - tapOn: { id: "email" }      # by accessibility id
+  - inputText: "me@example.com"
+  - scroll
+  - assertVisible: "Welcome"
+  - takeScreenshot: home        # relative name only, no path
+  - tapOn: { point: "50%,80%" } # last resort when nothing has a label
+
+Workflow: hierarchy → act via run_flow → screenshot or takeScreenshot → verify. Re-run hierarchy after navigation.
+
+GATING: the user must have sent "/simulator on" in this chat. If refused, relay that and ask them to enable it rather than working around it. Nothing here is a shell; only the listed actions run.`,
+    {
+      action: z.enum(['hierarchy', 'screenshot', 'run_flow', 'list_devices']),
+      flow_yaml: z.string().optional().describe('For run_flow: the complete Maestro flow YAML, including the appId header and "---" separator.'),
+      name: z.string().optional().describe('For screenshot: file stem (letters, digits, - and _). Saved as /workspace/group/maestro/<name>.png. Defaults to a generated name.'),
+      device: z.string().optional().describe('Simulator UDID from list_devices. Defaults to the currently booted simulator.'),
+      timeout_seconds: z
+        .number()
+        .optional()
+        .describe(`Wall-clock limit. Default ${DEFAULT_TIMEOUT_S}s, max ${MAX_TIMEOUT_S}s. Raise it for long flows.`),
+    },
+    async (args) => {
+      const timeoutS = Math.min(
+        Math.max(args.timeout_seconds ?? DEFAULT_TIMEOUT_S, 1),
+        MAX_TIMEOUT_S,
+      );
+      const requestId = `sim-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      writeIpcFile(TASKS_DIR, {
+        type: 'simulator',
+        requestId,
+        action: args.action,
+        flowYaml: args.flow_yaml,
+        name: args.name,
+        device: args.device,
+        timeoutMs: timeoutS * 1000,
+        groupFolder,
+        timestamp: new Date().toISOString(),
+      });
+
+      const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+      const deadline = Date.now() + timeoutS * 1000 + RESULT_SLACK_MS;
+
+      let raw: string | null = null;
+      while (Date.now() < deadline) {
+        await sleep(POLL_MS);
+        try {
+          raw = fs.readFileSync(resultPath, 'utf-8');
+          break;
+        } catch {
+          // Not written yet.
+        }
+      }
+
+      if (raw === null) {
+        return {
+          content: [{ type: 'text' as const, text: `No result from the host after ${timeoutS}s. The simulator action may still be running; check with a hierarchy or screenshot before retrying a flow with side effects.` }],
+          isError: true,
+        };
+      }
+
+      try {
+        fs.unlinkSync(resultPath);
+      } catch {
+        // Host sweeps stale results.
+      }
+
+      let result: {
+        ok: boolean;
+        exitCode: number | null;
+        stdout: string;
+        stderr: string;
+        truncated: boolean;
+        timedOut: boolean;
+        durationMs: number;
+        screenshots: string[];
+        outputDir?: string;
+        error?: string;
+      };
+      try {
+        result = JSON.parse(raw);
+      } catch {
+        return {
+          content: [{ type: 'text' as const, text: 'The host wrote an unreadable result file.' }],
+          isError: true,
+        };
+      }
+
+      if (result.error && result.exitCode === null && !result.timedOut) {
+        return {
+          content: [{ type: 'text' as const, text: `Refused by host: ${result.error}` }],
+          isError: true,
+        };
+      }
+
+      const header = [
+        `${args.action}`,
+        `exit ${result.exitCode ?? 'n/a'}`,
+        `${(result.durationMs / 1000).toFixed(1)}s`,
+        result.timedOut ? 'TIMED OUT' : null,
+        result.truncated ? 'OUTPUT TRUNCATED' : null,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+      const shots = result.screenshots?.length
+        ? `--- screenshots ---\n${result.screenshots.join('\n')}`
+        : null;
+
+      // Maestro's own CLI chatter goes to stdout; for hierarchy that IS the
+      // payload, for flows it is the step-by-step status list.
+      const body = [
+        header,
+        shots,
+        result.outputDir ? `run dir: ${result.outputDir}` : null,
+        result.stdout ? `--- stdout ---\n${result.stdout}` : null,
+        result.stderr ? `--- stderr ---\n${result.stderr}` : null,
+        result.error && result.timedOut ? `--- note ---\n${result.error}` : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      return { content: [{ type: 'text' as const, text: body }], isError: !result.ok };
+    },
+  );
+}
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

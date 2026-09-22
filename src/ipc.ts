@@ -8,6 +8,7 @@ import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { handleHostExec } from './godmode.js';
+import { handleSimulatorRequest } from './simulator.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { handleOpenHost } from './open-host.js';
@@ -263,6 +264,10 @@ export async function processTaskIpc(
     command?: string;
     cwd?: string;
     timeoutMs?: number;
+    // simulator
+    action?: string;
+    device?: string;
+    flowYaml?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -597,6 +602,22 @@ export async function processTaskIpc(
         groupFolder: sourceGroup,
         isMain,
         additionalMounts: groupEntry?.containerConfig?.additionalMounts,
+      });
+      break;
+    }
+
+    case 'simulator': {
+      // iOS Simulator via Maestro. Any group may be enabled; the group folder
+      // comes from the IPC directory and simulator.ts re-reads the switch per
+      // request. Not awaited — a flow run can take a minute.
+      handleSimulatorRequest({
+        requestId: data.requestId,
+        action: data.action,
+        device: data.device,
+        name: data.name,
+        flowYaml: data.flowYaml,
+        timeoutMs: data.timeoutMs,
+        groupFolder: sourceGroup,
       });
       break;
     }

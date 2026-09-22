@@ -70,6 +70,7 @@ import {
 import { logDesignAccessStatus } from './design-probe.js';
 import { startLogRotation } from './log-rotate.js';
 import { getGodModeStatus, setGodMode } from './godmode.js';
+import { getSimulatorStatus, setSimulator } from './simulator.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import {
@@ -1087,6 +1088,74 @@ async function main(): Promise<void> {
     );
   }
 
+  // "/simulator" (status), "/simulator on", "/simulator off" — iOS Simulator
+  // access through Maestro. Any chat may be enabled; only the owner may flip
+  // it. Re-read per request, so "off" revokes a running container.
+  async function handleSimulatorCommand(
+    chatJid: string,
+    arg: string,
+    isOwner: boolean,
+    sender: string,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    const status = getSimulatorStatus(group.folder);
+    const describe = () => {
+      const since = status.changedAt
+        ? ` since ${new Date(status.changedAt).toLocaleString('en-GB', { timeZone: TIMEZONE })}`
+        : '';
+      return status.enabled
+        ? `📱 simulator is ON${since} — I can drive the iOS Simulator (screenshots, taps, flows). Screenshots land in /workspace/group/maestro/. Send /simulator off to revoke.`
+        : `📵 simulator is OFF${since ? ` (last change${since})` : ''} — iOS Simulator actions are refused. Send /simulator on to allow them.`;
+    };
+
+    if (!arg) {
+      await channel.sendMessage(chatJid, describe());
+      return;
+    }
+
+    if (arg !== 'on' && arg !== 'off') {
+      await channel.sendMessage(
+        chatJid,
+        'Usage: /simulator (status), /simulator on, /simulator off.',
+      );
+      return;
+    }
+
+    if (!isOwner) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ Only the owner can change simulator access.',
+      );
+      return;
+    }
+
+    const enabled = arg === 'on';
+    if (enabled === status.enabled) {
+      await channel.sendMessage(chatJid, `Already ${arg}. ${describe()}`);
+      return;
+    }
+
+    try {
+      setSimulator(group.folder, enabled, sender);
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to persist simulator state');
+      await channel.sendMessage(chatJid, '⚠️ Failed to save simulator setting.');
+      return;
+    }
+
+    await channel.sendMessage(
+      chatJid,
+      enabled
+        ? '📱 simulator ON. I can now drive the booted iOS Simulator on this Mac through Maestro — inspect the screen, tap and type by element label, run flows, and take screenshots. ' +
+            'Ask in plain language ("open the app and screenshot the login screen"). Send /simulator off when you\'re done.'
+        : '📵 simulator OFF. iOS Simulator actions are refused again, including from an agent that is still running.',
+    );
+  }
+
   // The model this chat's next container will run on: per-group override
   // (set via /model) or the global default.
   function currentModelId(chatJid: string): string {
@@ -1441,10 +1510,7 @@ async function main(): Promise<void> {
       body = readConsumable(match);
     } catch (err) {
       logger.error({ err, slug: match.slug }, 'Failed to read consumable');
-      await channel.sendMessage(
-        chatJid,
-        `⚠️ Could not read ${match.relPath}.`,
-      );
+      await channel.sendMessage(chatJid, `⚠️ Could not read ${match.relPath}.`);
       return;
     }
 
@@ -1559,6 +1625,17 @@ async function main(): Promise<void> {
         const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
         handleGodModeCommand(chatJid, arg, isOwner, msg.sender).catch((err) =>
           logger.error({ err, chatJid }, 'Godmode command error'),
+        );
+        return;
+      }
+
+      // /simulator [on|off] — iOS Simulator access for this chat.
+      const simMatch = /^\/simulator(?:@\S+)?\b(.*)$/i.exec(trimmed);
+      if (simMatch) {
+        const arg = simMatch[1].trim().toLowerCase();
+        const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
+        handleSimulatorCommand(chatJid, arg, isOwner, msg.sender).catch(
+          (err) => logger.error({ err, chatJid }, 'Simulator command error'),
         );
         return;
       }

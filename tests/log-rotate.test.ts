@@ -23,7 +23,10 @@ afterEach(() => {
 const write = (lines: number) =>
   fs.writeFileSync(
     logFile,
-    Array.from({ length: lines }, (_, i) => `line ${i} ${'x'.repeat(200)}`).join('\n'),
+    Array.from(
+      { length: lines },
+      (_, i) => `line ${i} ${'x'.repeat(200)}`,
+    ).join('\n'),
   );
 
 describe('trimLogIfLarge', () => {
@@ -62,8 +65,12 @@ describe('trimLogIfLarge', () => {
   });
 
   it('is a no-op for a missing file rather than throwing', () => {
-    expect(() => trimLogIfLarge(path.join(dir, 'nope.log'), 10, 5)).not.toThrow();
-    expect(trimLogIfLarge(path.join(dir, 'nope.log'), 10, 5).trimmed).toBe(false);
+    expect(() =>
+      trimLogIfLarge(path.join(dir, 'nope.log'), 10, 5),
+    ).not.toThrow();
+    expect(trimLogIfLarge(path.join(dir, 'nope.log'), 10, 5).trimmed).toBe(
+      false,
+    );
   });
 
   it('is a no-op when no log file can be resolved', () => {

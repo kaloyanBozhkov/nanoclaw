@@ -98,7 +98,11 @@ export function trimLogIfLarge(
 
     const after = fs.statSync(filePath).size;
     logger.info(
-      { filePath, beforeMB: Math.round(before / 1048576), afterMB: Math.round(after / 1048576) },
+      {
+        filePath,
+        beforeMB: Math.round(before / 1048576),
+        afterMB: Math.round(after / 1048576),
+      },
       'Trimmed service log',
     );
     return { trimmed: true, before, after };

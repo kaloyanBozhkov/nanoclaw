@@ -61,6 +61,14 @@ export const GODMODE_STATE_PATH = path.join(
   'nanoclaw',
   'godmode.json',
 );
+// Simulator switch: which groups may drive the iOS Simulator through Maestro.
+// Same home as godmode, for the same reason. See simulator.ts.
+export const SIMULATOR_STATE_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'simulator.json',
+);
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const RULES_DIR = path.resolve(PROJECT_ROOT, 'rules');

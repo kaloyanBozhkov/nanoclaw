@@ -169,6 +169,26 @@ already running. Every command and refusal is appended to
 | `/godmode on` | Allow the agent to run commands on this machine. Owner only. |
 | `/godmode off` | Refuse them again, including from a container that is still running. Owner only. |
 
+**iOS Simulator (Maestro)**
+
+Off by default, per chat. While it is on, the agent can drive the iOS Simulator
+running on this Mac through [Maestro](https://maestro.dev): dump the screen's
+accessibility tree, tap and type by element label, run flows, and take
+screenshots. Any chat may be enabled (not just main); only the owner can flip
+it. Unlike godmode this is not a shell — the agent picks from four fixed actions
+and nothing it sends is shell-interpreted. The switch lives in
+`~/.config/nanoclaw/simulator.json` and is re-read per request. Output lands in
+`groups/<folder>/maestro/`, which the agent sees as `/workspace/group/maestro/`,
+so screenshots can be viewed and sent straight from there. Requires Maestro on
+the host (`curl -fsSL https://get.maestro.mobile.dev | bash`) and a booted
+simulator. Every action is appended to `data/simulator-audit.jsonl`.
+
+| Command | What it does |
+|---|---|
+| `/simulator` | Show whether simulator access is on for this chat. |
+| `/simulator on` | Allow this chat's agent to drive the simulator. Owner only. |
+| `/simulator off` | Refuse again, including from a container that is still running. Owner only. |
+
 **Pins**
 
 | Command | What it does |
