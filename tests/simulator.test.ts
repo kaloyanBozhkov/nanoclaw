@@ -12,6 +12,7 @@ const DATA_DIR = path.join(tmpRoot, 'data');
 const IPC_DIR = path.join(DATA_DIR, 'ipc');
 const GROUPS_DIR = path.join(tmpRoot, 'groups');
 const FAKE_BIN = path.join(tmpRoot, 'fake-maestro');
+const FAKE_SDK = path.join(tmpRoot, 'android-sdk');
 
 vi.mock('../src/config.js', () => ({
   SIMULATOR_STATE_PATH: STATE_PATH,
@@ -46,6 +47,32 @@ exit 0
   { mode: 0o755 },
 );
 process.env.MAESTRO_BIN = FAKE_BIN;
+
+// Fake Android SDK: adb echoes argv (and writes PNG bytes for screencap),
+// emulator lists one AVD.
+fs.mkdirSync(path.join(FAKE_SDK, 'platform-tools'), { recursive: true });
+fs.mkdirSync(path.join(FAKE_SDK, 'emulator'), { recursive: true });
+fs.writeFileSync(
+  path.join(FAKE_SDK, 'platform-tools', 'adb'),
+  `#!/bin/sh
+echo "adb argv: $*" >&2
+case "$*" in
+  *"exec-out screencap -p"*) printf 'PNG';;
+  "devices -l") echo "List of devices attached"; echo "emulator-5554 device";;
+  *) echo "adb: $*";;
+esac
+`,
+  { mode: 0o755 },
+);
+fs.writeFileSync(
+  path.join(FAKE_SDK, 'emulator', 'emulator'),
+  `#!/bin/sh
+[ "$1" = "-list-avds" ] && echo "Pixel_8"
+exit 0
+`,
+  { mode: 0o755 },
+);
+process.env.ANDROID_HOME = FAKE_SDK;
 
 const {
   getSimulatorStatus,
@@ -125,7 +152,7 @@ describe('simulator gating', () => {
     });
     const result = await awaitResult('sim-any');
     expect(result.ok).toBe(true);
-    expect(result.stdout).toContain('argv: hierarchy');
+    expect(result.stdout).toContain('argv: --platform ios hierarchy');
   });
 
   it('ignores a request id that could escape the results dir', async () => {
@@ -180,7 +207,9 @@ describe('simulator actions', () => {
       groupFolder: GROUP,
     });
     const result = await awaitResult('sim-dev');
-    expect(result.stdout.trim()).toBe('argv: --device ABC-123 hierarchy');
+    expect(result.stdout.trim()).toBe(
+      'argv: --platform ios --device ABC-123 hierarchy',
+    );
   });
 
   it('run_flow writes the YAML under the group maestro dir and reports screenshots', async () => {
@@ -225,5 +254,78 @@ describe('simulator actions', () => {
       groupFolder: GROUP,
     });
     expect((await awaitResult('sim-revoked')).ok).toBe(false);
+  });
+});
+
+describe('android platform', () => {
+  it('rejects an unknown platform', async () => {
+    setSimulator(GROUP, true, 'owner');
+    handleSimulatorRequest({
+      requestId: 'sim-badplat',
+      action: 'hierarchy',
+      platform: 'windows',
+      groupFolder: GROUP,
+    });
+    expect(String((await awaitResult('sim-badplat')).error)).toContain(
+      'platform',
+    );
+  });
+
+  it('pins maestro to the android platform for hierarchy and flows', async () => {
+    setSimulator(GROUP, true, 'owner');
+    handleSimulatorRequest({
+      requestId: 'sim-and-hier',
+      action: 'hierarchy',
+      platform: 'android',
+      device: 'emulator-5554',
+      groupFolder: GROUP,
+    });
+    const r = await awaitResult('sim-and-hier');
+    expect(r.stdout.trim()).toBe(
+      'argv: --platform android --device emulator-5554 hierarchy',
+    );
+  });
+
+  it('list_devices on android reports running emulators and AVDs', async () => {
+    setSimulator(GROUP, true, 'owner');
+    handleSimulatorRequest({
+      requestId: 'sim-and-list',
+      action: 'list_devices',
+      platform: 'android',
+      groupFolder: GROUP,
+    });
+    const r = await awaitResult('sim-and-list');
+    expect(r.ok).toBe(true);
+    expect(r.stdout).toContain('emulator-5554 device');
+    expect(r.stdout).toContain('Pixel_8');
+  });
+
+  it('screenshot on android goes through adb screencap into the maestro dir', async () => {
+    setSimulator(GROUP, true, 'owner');
+    handleSimulatorRequest({
+      requestId: 'sim-and-shot',
+      action: 'screenshot',
+      platform: 'android',
+      name: 'home',
+      groupFolder: GROUP,
+    });
+    const r = await awaitResult('sim-and-shot');
+    expect(r.ok).toBe(true);
+    expect(r.screenshots).toEqual(['/workspace/group/maestro/home.png']);
+    expect(
+      fs.readFileSync(path.join(groupMaestroDir(GROUP), 'home.png'), 'utf-8'),
+    ).toBe('PNG');
+    expect(r.stderr).toContain('exec-out screencap -p');
+  });
+
+  it('boot on android requires an AVD name', async () => {
+    setSimulator(GROUP, true, 'owner');
+    handleSimulatorRequest({
+      requestId: 'sim-and-boot',
+      action: 'boot',
+      platform: 'android',
+      groupFolder: GROUP,
+    });
+    expect(String((await awaitResult('sim-and-boot')).error)).toContain('AVD');
   });
 });

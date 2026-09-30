@@ -71,6 +71,7 @@ import { logDesignAccessStatus } from './design-probe.js';
 import { startLogRotation } from './log-rotate.js';
 import { getGodModeStatus, setGodMode } from './godmode.js';
 import { getSimulatorStatus, setSimulator } from './simulator.js';
+import { restartContainerRuntime } from './container-runtime.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import {
@@ -1088,6 +1089,35 @@ async function main(): Promise<void> {
     );
   }
 
+  // "/docker-restart" — force-restart the container runtime. Owner only, any
+  // chat: a wedged Docker daemon stalls every group at once, and the owner
+  // should be able to kick it from whichever chat they noticed it in.
+  async function handleDockerRestartCommand(
+    chatJid: string,
+    isOwner: boolean,
+  ): Promise<void> {
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+    if (!isOwner) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ Only the owner can restart Docker.',
+      );
+      return;
+    }
+    await channel.sendMessage(
+      chatJid,
+      '🐳 Restarting Docker… every running agent will be cut off and their messages retried once it is back. This usually takes 30–60s.',
+    );
+    const result = await restartContainerRuntime();
+    await channel.sendMessage(
+      chatJid,
+      result.ok
+        ? `🐳 Docker is back (server ${result.version}) after ${Math.round(result.durationMs / 1000)}s. Agents will pick up pending messages on the next incoming message in each chat.`
+        : `⚠️ Docker restart failed after ${Math.round(result.durationMs / 1000)}s: ${result.error}\nSteps taken: ${result.steps.join(' → ')}`,
+    );
+  }
+
   // "/simulator" (status), "/simulator on", "/simulator off" — iOS Simulator
   // access through Maestro. Any chat may be enabled; only the owner may flip
   // it. Re-read per request, so "off" revokes a running container.
@@ -1108,8 +1138,8 @@ async function main(): Promise<void> {
         ? ` since ${new Date(status.changedAt).toLocaleString('en-GB', { timeZone: TIMEZONE })}`
         : '';
       return status.enabled
-        ? `📱 simulator is ON${since} — I can drive the iOS Simulator (screenshots, taps, flows). Screenshots land in /workspace/group/maestro/. Send /simulator off to revoke.`
-        : `📵 simulator is OFF${since ? ` (last change${since})` : ''} — iOS Simulator actions are refused. Send /simulator on to allow them.`;
+        ? `📱 simulator is ON${since} — I can drive the iOS Simulator and Android Emulator (screenshots, taps, flows). Screenshots land in /workspace/group/maestro/. Send /simulator off to revoke.`
+        : `📵 simulator is OFF${since ? ` (last change${since})` : ''} — simulator/emulator actions are refused. Send /simulator on to allow them.`;
     };
 
     if (!arg) {
@@ -1143,16 +1173,19 @@ async function main(): Promise<void> {
       setSimulator(group.folder, enabled, sender);
     } catch (err) {
       logger.error({ err, chatJid }, 'Failed to persist simulator state');
-      await channel.sendMessage(chatJid, '⚠️ Failed to save simulator setting.');
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ Failed to save simulator setting.',
+      );
       return;
     }
 
     await channel.sendMessage(
       chatJid,
       enabled
-        ? '📱 simulator ON. I can now drive the booted iOS Simulator on this Mac through Maestro — inspect the screen, tap and type by element label, run flows, and take screenshots. ' +
+        ? '📱 simulator ON. I can now drive the iOS Simulator and Android Emulator on this Mac through Maestro — inspect the screen, tap and type by element label, run flows, and take screenshots. ' +
             'Ask in plain language ("open the app and screenshot the login screen"). Send /simulator off when you\'re done.'
-        : '📵 simulator OFF. iOS Simulator actions are refused again, including from an agent that is still running.',
+        : '📵 simulator OFF. simulator/emulator actions are refused again, including from an agent that is still running.',
     );
   }
 
@@ -1629,13 +1662,22 @@ async function main(): Promise<void> {
         return;
       }
 
+      // /docker-restart — force-restart the container runtime. Owner only.
+      if (/^\/docker-restart(?:@\S+)?$/i.test(trimmed)) {
+        const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
+        handleDockerRestartCommand(chatJid, isOwner).catch((err) =>
+          logger.error({ err, chatJid }, 'Docker restart command error'),
+        );
+        return;
+      }
+
       // /simulator [on|off] — iOS Simulator access for this chat.
       const simMatch = /^\/simulator(?:@\S+)?\b(.*)$/i.exec(trimmed);
       if (simMatch) {
         const arg = simMatch[1].trim().toLowerCase();
         const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
-        handleSimulatorCommand(chatJid, arg, isOwner, msg.sender).catch(
-          (err) => logger.error({ err, chatJid }, 'Simulator command error'),
+        handleSimulatorCommand(chatJid, arg, isOwner, msg.sender).catch((err) =>
+          logger.error({ err, chatJid }, 'Simulator command error'),
         );
         return;
       }

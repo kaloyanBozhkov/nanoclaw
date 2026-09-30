@@ -266,6 +266,7 @@ export async function processTaskIpc(
     timeoutMs?: number;
     // simulator
     action?: string;
+    platform?: string;
     device?: string;
     flowYaml?: string;
   },
@@ -613,6 +614,7 @@ export async function processTaskIpc(
       handleSimulatorRequest({
         requestId: data.requestId,
         action: data.action,
+        platform: data.platform,
         device: data.device,
         name: data.name,
         flowYaml: data.flowYaml,

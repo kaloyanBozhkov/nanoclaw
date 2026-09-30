@@ -2,9 +2,10 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
+import { exec, execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
+import { promisify } from 'util';
 
 import { logger } from './logger.js';
 
@@ -124,4 +125,139 @@ export function cleanupOrphans(): void {
   } catch (err) {
     logger.warn({ err }, 'Failed to clean up orphaned containers');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Restart (the /docker-restart chat command)
+// ---------------------------------------------------------------------------
+
+const execAsync = promisify(exec);
+
+export interface RuntimeRestartResult {
+  ok: boolean;
+  /** Server version reported once the daemon answered again. */
+  version?: string;
+  durationMs: number;
+  /** What went wrong, or why it was refused. */
+  error?: string;
+  /** Human-readable steps taken, for the chat reply. */
+  steps: string[];
+}
+
+/** Poll timeout while waiting for the daemon to answer after a relaunch. */
+export const RUNTIME_RESTART_WAIT_MS = 180_000;
+
+let restartInFlight: Promise<RuntimeRestartResult> | null = null;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Run a command, never throw — a step that fails is reported, not fatal. */
+async function tryRun(cmd: string, timeoutMs = 15_000): Promise<boolean> {
+  try {
+    await execAsync(cmd, { timeout: timeoutMs });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Wait until `docker version` answers, returning the server version. */
+async function waitForDaemon(deadlineMs: number): Promise<string | null> {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    try {
+      const { stdout } = await execAsync(
+        `${CONTAINER_RUNTIME_BIN} version --format '{{.Server.Version}}'`,
+        { timeout: 8_000 },
+      );
+      const v = stdout.trim();
+      if (v) return v;
+    } catch {
+      // Not up yet.
+    }
+    await sleep(5_000);
+  }
+  return null;
+}
+
+/**
+ * Force-restart the container runtime.
+ *
+ * Exists for the case where Docker Desktop's backend wedges: `docker ps` hangs
+ * forever, every container spawn times out, and no agent in any group can
+ * respond. A graceful quit does not recover from that — the backend process
+ * survives it — so this does the full sequence: ask Docker to quit, kill
+ * whatever is left, drop the stale socket, relaunch, and wait for the daemon
+ * to answer. Every running agent container dies with it; the message loop
+ * rolls their messages back and retries once the daemon is back.
+ *
+ * macOS / Docker Desktop only for the kill-and-relaunch path. On Linux it
+ * falls back to `systemctl restart docker`. Concurrent calls share one
+ * restart rather than stacking.
+ */
+export function restartContainerRuntime(): Promise<RuntimeRestartResult> {
+  if (restartInFlight) return restartInFlight;
+  restartInFlight = doRestart().finally(() => {
+    restartInFlight = null;
+  });
+  return restartInFlight;
+}
+
+async function doRestart(): Promise<RuntimeRestartResult> {
+  const startedAt = Date.now();
+  const steps: string[] = [];
+  const done = (ok: boolean, error?: string, version?: string) => ({
+    ok,
+    version,
+    error,
+    durationMs: Date.now() - startedAt,
+    steps,
+  });
+
+  logger.warn('Container runtime restart requested');
+
+  if (process.platform === 'linux') {
+    steps.push('systemctl restart docker');
+    if (!(await tryRun('systemctl restart docker', 60_000))) {
+      return done(false, 'systemctl restart docker failed');
+    }
+  } else if (process.platform === 'darwin') {
+    steps.push('asked Docker Desktop to quit');
+    await tryRun(`osascript -e 'quit app "Docker"'`);
+    await sleep(5_000);
+
+    // A wedged backend ignores the quit; this is the part that matters.
+    steps.push('killed leftover Docker processes');
+    await tryRun(`pkill -9 -f 'com.docker.backend'`);
+    await tryRun(`pkill -9 -f 'Docker Desktop.app'`);
+    await tryRun(`pkill -9 -f 'Docker.app/Contents/MacOS/Docker'`);
+    await sleep(3_000);
+
+    const sock = `${os.homedir()}/.docker/run/docker.sock`;
+    try {
+      fs.unlinkSync(sock);
+      steps.push('removed stale socket');
+    } catch {
+      // Already gone.
+    }
+
+    steps.push('relaunched Docker Desktop');
+    if (!(await tryRun('open -a Docker'))) {
+      return done(false, 'could not launch Docker Desktop (open -a Docker failed)');
+    }
+  } else {
+    return done(false, `unsupported platform: ${process.platform}`);
+  }
+
+  steps.push('waited for the daemon');
+  const version = await waitForDaemon(RUNTIME_RESTART_WAIT_MS);
+  if (!version) {
+    logger.error('Container runtime did not come back after restart');
+    return done(
+      false,
+      `daemon did not answer within ${RUNTIME_RESTART_WAIT_MS / 1000}s`,
+    );
+  }
+  logger.warn({ version }, 'Container runtime restarted');
+  return done(true, undefined, version);
 }

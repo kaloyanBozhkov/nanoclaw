@@ -14,6 +14,9 @@ vi.mock('../src/logger.js', () => ({
 const mockExecSync = vi.fn();
 vi.mock('child_process', () => ({
   execSync: (...args: unknown[]) => mockExecSync(...args),
+  // restartContainerRuntime promisifies exec at import time; the restart test
+  // never reaches it.
+  exec: vi.fn(),
 }));
 
 import {
@@ -145,5 +148,30 @@ describe('cleanupOrphans', () => {
       { count: 2, names: ['nanoclaw-a-1', 'nanoclaw-b-2'] },
       'Stopped orphaned containers',
     );
+  });
+});
+
+// --- restartContainerRuntime ---
+
+describe('restartContainerRuntime', () => {
+  it('dedupes concurrent calls into one in-flight restart', async () => {
+    const { restartContainerRuntime } = await import(
+      '../src/container-runtime.js'
+    );
+    // The module's async path uses promisified exec, which this file does not
+    // mock; on an unsupported platform it returns before touching it.
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const a = restartContainerRuntime();
+      const b = restartContainerRuntime();
+      expect(a).toBe(b);
+      const result = await a;
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('unsupported platform');
+      expect(result.steps).toEqual([]);
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
   });
 });

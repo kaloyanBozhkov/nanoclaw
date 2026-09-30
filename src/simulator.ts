@@ -1,8 +1,8 @@
 /**
- * iOS Simulator access via Maestro — per-group, host-side.
+ * iOS Simulator / Android Emulator access via Maestro — per-group, host-side.
  *
- * The container agent runs in a Linux VM and can never see the iOS Simulator,
- * which only exists on the Mac host. This module is the bridge: a container
+ * The container agent runs in a Linux VM and can never see the iOS Simulator
+ * or the Android Emulator, which only exist on the Mac host. This module is the bridge: a container
  * writes a `simulator` IPC request, the host runs the matching Maestro or
  * simctl command against the booted simulator, and writes the result back
  * under the group's IPC namespace (`ipc/results/<requestId>.json`), the same
@@ -116,11 +116,15 @@ export function setSimulator(
 
 export const SIMULATOR_ACTIONS = [
   'list_devices',
+  'boot',
   'hierarchy',
   'screenshot',
   'run_flow',
 ] as const;
 export type SimulatorAction = (typeof SIMULATOR_ACTIONS)[number];
+
+export const SIMULATOR_PLATFORMS = ['ios', 'android'] as const;
+export type SimulatorPlatform = (typeof SIMULATOR_PLATFORMS)[number];
 
 export const DEFAULT_SIM_TIMEOUT_MS = 120_000;
 export const MAX_SIM_TIMEOUT_MS = 600_000;
@@ -129,8 +133,11 @@ const MAX_STREAM_CHARS = 200_000;
 const RESULT_TTL_MS = 60 * 60 * 1000;
 
 const SAFE_REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
-/** Simulator UDIDs and screenshot names: no separators, no traversal. */
-const SAFE_DEVICE = /^[A-Za-z0-9-]{1,64}$/;
+/**
+ * Device ids: iOS UDIDs, Android serials (`emulator-5554`) and AVD names
+ * (`Pixel_8.api34`). No spaces, slashes or shell characters.
+ */
+const SAFE_DEVICE = /^[A-Za-z0-9_.-]{1,64}$/;
 const SAFE_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 /** Where the maestro dir shows up inside the container. */
 const CONTAINER_GROUP_DIR = '/workspace/group';
@@ -138,7 +145,13 @@ const CONTAINER_GROUP_DIR = '/workspace/group';
 export interface SimulatorRequest {
   requestId?: string;
   action?: string;
-  /** Simulator UDID. Defaults to the booted device. */
+  /** Which simulator family. Defaults to iOS. */
+  platform?: string;
+  /**
+   * iOS: simulator UDID. Android: emulator serial (`emulator-5554`) for
+   * hierarchy/screenshot/run_flow, AVD name for `boot`. Defaults to the
+   * booted / only running device.
+   */
   device?: string;
   /** For `screenshot`: file stem under groups/<folder>/maestro/. */
   name?: string;
@@ -252,6 +265,74 @@ export function maestroBin(): string {
   );
 }
 
+/** Android SDK root: ANDROID_HOME, else the Android Studio default. */
+export function androidSdk(): string {
+  return (
+    process.env.ANDROID_HOME ||
+    process.env.ANDROID_SDK_ROOT ||
+    path.join(os.homedir(), 'Library', 'Android', 'sdk')
+  );
+}
+function adbBin(): string {
+  return path.join(androidSdk(), 'platform-tools', 'adb');
+}
+function emulatorBin(): string {
+  return path.join(androidSdk(), 'emulator', 'emulator');
+}
+
+/**
+ * Fixed shell scripts for the few steps that need more than one process.
+ * Request data reaches them only as positional parameters ("$1"), never by
+ * interpolation, so a device name can't become a command.
+ */
+const SH = {
+  /** $1 = adb, $2 = serial-or-empty, $3 = output file. */
+  androidScreenshot: `adb="$1"; serial="$2"; out="$3"
+if [ -n "$serial" ]; then set -- -s "$serial"; else set --; fi
+"$adb" "$@" exec-out screencap -p > "$out"`,
+  /**
+   * Both platforms, always — so an agent can never look at one list and
+   * conclude the other platform doesn't exist. $1 = adb, $2 = emulator.
+   */
+  listAll: `echo "=== iOS simulators (xcrun simctl) ==="
+xcrun simctl list devices available 2>/dev/null | grep -E '^(--|    )' || echo "(xcrun unavailable)"
+echo
+echo "=== Android: running emulators (adb devices -l) ==="
+out="$("$1" devices -l 2>/dev/null | tail -n +2 | grep -v '^$')"
+if [ -n "$out" ]; then echo "$out"; else echo "(none running — use action=boot with device=<AVD name> below)"; fi
+echo
+echo "=== Android: bootable AVDs (emulator -list-avds) ==="
+"$2" -list-avds 2>/dev/null | grep -v '^$' || echo "(no AVDs — create one in Android Studio)"`,
+  /** $1 = adb, $2 = emulator, $3 = AVD name, $4 = boot timeout seconds. */
+  androidBoot: `adb="$1"; emu="$2"; avd="$3"; limit="$4"
+if "$adb" devices | grep -q '^emulator-'; then
+  echo "an emulator is already running; use list_devices to see it"; exit 0
+fi
+"$adb" start-server >/dev/null 2>&1
+nohup "$emu" -avd "$avd" -no-snapshot-load -no-boot-anim >/dev/null 2>&1 &
+echo "launched emulator -avd $avd (pid $!)"
+i=0
+while [ "$i" -lt "$limit" ]; do
+  if [ "$("$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+    echo "booted: $("$adb" devices | grep '^emulator-' | head -1)"; exit 0
+  fi
+  sleep 2; i=$((i+2))
+done
+echo "emulator did not finish booting within \${limit}s"; exit 1`,
+  /** $1 = UDID-or-empty. */
+  iosBoot: `udid="$1"
+if [ -z "$udid" ]; then
+  udid="$(xcrun simctl list devices booted | grep -oE '[0-9A-F-]{36}' | head -1)"
+  if [ -n "$udid" ]; then echo "already booted: $udid"; open -a Simulator; exit 0; fi
+  udid="$(xcrun simctl list devices available | grep 'iPhone' | grep -oE '[0-9A-F-]{36}' | head -1)"
+  if [ -z "$udid" ]; then echo "no simulator booted and no iPhone simulator available; create one in Xcode"; exit 1; fi
+  echo "nothing booted; picking first available iPhone: $udid"
+fi
+xcrun simctl boot "$udid" 2>&1 | grep -v 'Unable to boot device in current state: Booted' || true
+open -a Simulator
+xcrun simctl bootstatus "$udid" -b && echo "booted: $udid"`,
+};
+
 /** Host path of this group's maestro output dir, created on demand. */
 export function groupMaestroDir(groupFolder: string): string {
   const dir = path.join(resolveGroupFolderPath(groupFolder), 'maestro');
@@ -306,29 +387,81 @@ interface Plan {
 function plan(
   req: SimulatorRequest,
   requestId: string,
+  timeoutMs: number,
 ): { ok: true; plan: Plan } | { ok: false; reason: string } {
   const action = req.action as SimulatorAction;
+  const platform = ((req.platform ?? 'ios').trim() ||
+    'ios') as SimulatorPlatform;
+  if (!SIMULATOR_PLATFORMS.includes(platform)) {
+    return { ok: false, reason: 'platform must be "ios" or "android"' };
+  }
+  const android = platform === 'android';
   const device = (req.device ?? '').trim();
   if (device && !SAFE_DEVICE.test(device)) {
-    return { ok: false, reason: 'device must be a simulator UDID' };
+    return {
+      ok: false,
+      reason: android
+        ? 'device must be an emulator serial (emulator-5554) or AVD name'
+        : 'device must be a simulator UDID',
+    };
   }
-  const deviceArgs = device ? ['--device', device] : [];
-  const simctlTarget = device || 'booted';
+  // Maestro: pin the platform so a booted iPhone and a running emulator side
+  // by side never make it guess; pin the device when one was named.
+  const maestroArgs = [
+    '--platform',
+    platform,
+    ...(device ? ['--device', device] : []),
+  ];
 
   switch (action) {
     case 'list_devices':
+      // Platform-agnostic on purpose: shows iOS and Android side by side.
       return {
         ok: true,
         plan: {
-          bin: 'xcrun',
-          args: ['simctl', 'list', 'devices', 'available'],
+          bin: 'sh',
+          args: ['-c', SH.listAll, 'sh', adbBin(), emulatorBin()],
         },
       };
+
+    case 'boot': {
+      if (android && !device) {
+        return {
+          ok: false,
+          reason:
+            'boot on android needs device = an AVD name (see list_devices)',
+        };
+      }
+      // Leave the caller's timeout some slack for the process itself.
+      const bootLimitS = String(
+        Math.max(30, Math.floor(timeoutMs / 1000) - 10),
+      );
+      return android
+        ? {
+            ok: true,
+            plan: {
+              bin: 'sh',
+              args: [
+                '-c',
+                SH.androidBoot,
+                'sh',
+                adbBin(),
+                emulatorBin(),
+                device,
+                bootLimitS,
+              ],
+            },
+          }
+        : {
+            ok: true,
+            plan: { bin: 'sh', args: ['-c', SH.iosBoot, 'sh', device] },
+          };
+    }
 
     case 'hierarchy':
       return {
         ok: true,
-        plan: { bin: maestroBin(), args: [...deviceArgs, 'hierarchy'] },
+        plan: { bin: maestroBin(), args: [...maestroArgs, 'hierarchy'] },
       };
 
     case 'screenshot': {
@@ -340,14 +473,23 @@ function plan(
         };
       }
       const file = path.join(groupMaestroDir(req.groupFolder), `${name}.png`);
-      return {
-        ok: true,
-        plan: {
-          bin: 'xcrun',
-          args: ['simctl', 'io', simctlTarget, 'screenshot', file],
-          expectFile: file,
-        },
-      };
+      return android
+        ? {
+            ok: true,
+            plan: {
+              bin: 'sh',
+              args: ['-c', SH.androidScreenshot, 'sh', adbBin(), device, file],
+              expectFile: file,
+            },
+          }
+        : {
+            ok: true,
+            plan: {
+              bin: 'xcrun',
+              args: ['simctl', 'io', device || 'booted', 'screenshot', file],
+              expectFile: file,
+            },
+          };
     }
 
     case 'run_flow': {
@@ -365,7 +507,7 @@ function plan(
         ok: true,
         plan: {
           bin: maestroBin(),
-          args: [...deviceArgs, 'test', '--test-output-dir', runDir, flowFile],
+          args: [...maestroArgs, 'test', '--test-output-dir', runDir, flowFile],
           scanDir: runDir,
           outputDir: runDir,
         },
@@ -413,9 +555,19 @@ export function handleSimulatorRequest(req: SimulatorRequest): void {
     return;
   }
 
+  const timeoutMs = Math.min(
+    Math.max(
+      typeof req.timeoutMs === 'number' && req.timeoutMs > 0
+        ? req.timeoutMs
+        : DEFAULT_SIM_TIMEOUT_MS,
+      1000,
+    ),
+    MAX_SIM_TIMEOUT_MS,
+  );
+
   let planned: Plan;
   try {
-    const p = plan(req, requestId);
+    const p = plan(req, requestId, timeoutMs);
     if (!p.ok) {
       refuse(req.groupFolder, requestId, p.reason, action);
       return;
@@ -431,22 +583,25 @@ export function handleSimulatorRequest(req: SimulatorRequest): void {
     return;
   }
 
-  const timeoutMs = Math.min(
-    Math.max(
-      typeof req.timeoutMs === 'number' && req.timeoutMs > 0
-        ? req.timeoutMs
-        : DEFAULT_SIM_TIMEOUT_MS,
-      1000,
-    ),
-    MAX_SIM_TIMEOUT_MS,
-  );
-
   const startedAt = Date.now();
   logger.info(
-    { groupFolder: req.groupFolder, requestId, action, args: planned.args },
+    {
+      groupFolder: req.groupFolder,
+      requestId,
+      action,
+      platform: req.platform ?? 'ios',
+      device: req.device,
+      bin: path.basename(planned.bin),
+    },
     'Simulator: running action',
   );
-  auditLine({ groupFolder: req.groupFolder, requestId, action });
+  auditLine({
+    groupFolder: req.groupFolder,
+    requestId,
+    action,
+    platform: req.platform ?? 'ios',
+    device: req.device,
+  });
 
   // Maestro is a JVM app that needs JAVA_HOME / PATH from the login shell,
   // and simctl needs the Xcode developer dir. Inherit the user's environment
@@ -455,7 +610,8 @@ export function handleSimulatorRequest(req: SimulatorRequest): void {
     cwd: planned.outputDir ?? os.homedir(),
     env: {
       ...process.env,
-      PATH: `${process.env.PATH ?? ''}:${path.dirname(maestroBin())}:/opt/homebrew/bin:/usr/local/bin`,
+      PATH: `${process.env.PATH ?? ''}:${path.dirname(maestroBin())}:${path.dirname(adbBin())}:${path.dirname(emulatorBin())}:/opt/homebrew/bin:/usr/local/bin`,
+      ANDROID_HOME: androidSdk(),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

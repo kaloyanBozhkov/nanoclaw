@@ -22,7 +22,7 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `src/db.ts` | SQLite operations |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
 | `container/skills/agent-browser.md` | Browser automation tool (available to all agents via Bash) |
-| `container/skills/ios-simulator/SKILL.md` | iOS Simulator skill (uses the `ios_simulator` MCP tool) |
+| `container/skills/mobile-simulator/SKILL.md` | iOS Simulator skill (uses the `mobile_simulator` MCP tool) |
 
 ## Skills
 

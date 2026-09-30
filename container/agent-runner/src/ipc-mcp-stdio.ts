@@ -618,7 +618,7 @@ Runs through the user's login shell, so shell syntax (pipes, redirects, &&, quot
 }
 
 /**
- * iOS Simulator via Maestro — any group, gated per chat by `/simulator on`.
+ * iOS Simulator + Android Emulator via Maestro — any group, gated per chat by `/simulator on`.
  *
  * Request/response like run_on_host: the host runs a fixed action against the
  * simulator on the user's Mac and writes the result to /workspace/ipc/results.
@@ -633,35 +633,38 @@ Runs through the user's login shell, so shell syntax (pipes, redirects, &&, quot
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   server.tool(
-    'ios_simulator',
-    `Drive the iOS Simulator running on the user's Mac, through Maestro. Use it to look at, tap through, and screenshot a mobile app the same way agent-browser drives a web page.
+    'mobile_simulator',
+    `Drive the iOS Simulator AND the Android Emulator running on the user's Mac, through Maestro. Both platforms are fully supported — never conclude that Android (or iOS) is unavailable; if a device is not running, boot it with action "boot". Use it to look at, tap through, and screenshot a mobile app the same way agent-browser drives a web page. platform is REQUIRED on every call: "ios" or "android". Everything else works the same on both.
 
 Actions:
 - "hierarchy": dump the current screen's accessibility tree as JSON (element text, labels, bounds). Do this FIRST to learn what is on screen — it is cheaper and more reliable than reading a screenshot.
 - "screenshot": save a PNG of the current screen to /workspace/group/maestro/<name>.png. View it with Read, or hand the path to send_image.
 - "run_flow": run a Maestro flow written as inline YAML (flow_yaml). Every action in one flow is one host round-trip, so batch: launch, tap, type, assert, screenshot. Screenshots taken inside a flow (takeScreenshot: <name>) land under /workspace/group/maestro/runs/<id>/ and are listed in the result.
-- "list_devices": list available simulators with their UDIDs and state. Only needed when the default (the booted device) is not what you want.
+- "list_devices": lists BOTH platforms regardless of the platform argument — iOS simulators with UDIDs and state, Android running emulators (serials like emulator-5554), and Android AVDs that can be booted. Start here.
+- "boot": start a device. iOS — boots the given UDID (or reports the already-booted one). Android — REQUIRED before anything else if no emulator is running: pass device = an AVD name from list_devices; it launches headless-ish and waits for boot (give timeout_seconds: 180).
 
-Flow YAML essentials (maestro.dev docs for more):
-  appId: com.example.app        # header, then "---"
+Flow YAML essentials (maestro.dev docs for more; identical for iOS and Android):
+  appId: com.example.app        # header, then "---"  (Android: the applicationId)
   ---
   - launchApp
   - tapOn: "Sign in"            # by visible text / accessibility label
-  - tapOn: { id: "email" }      # by accessibility id
+  - tapOn: { id: "email" }      # iOS: accessibility id. Android: resource-id
   - inputText: "me@example.com"
   - scroll
   - assertVisible: "Welcome"
   - takeScreenshot: home        # relative name only, no path
   - tapOn: { point: "50%,80%" } # last resort when nothing has a label
+  - back                        # Android hardware back
 
-Workflow: hierarchy → act via run_flow → screenshot or takeScreenshot → verify. Re-run hierarchy after navigation.
+Workflow: (android: boot if needed) → hierarchy → act via run_flow → screenshot or takeScreenshot → verify. Re-run hierarchy after navigation.
 
 GATING: the user must have sent "/simulator on" in this chat. If refused, relay that and ask them to enable it rather than working around it. Nothing here is a shell; only the listed actions run.`,
     {
-      action: z.enum(['hierarchy', 'screenshot', 'run_flow', 'list_devices']),
+      action: z.enum(['hierarchy', 'screenshot', 'run_flow', 'list_devices', 'boot']),
+      platform: z.enum(['ios', 'android']).describe('Which device family this call targets. Required. Both are supported.'),
       flow_yaml: z.string().optional().describe('For run_flow: the complete Maestro flow YAML, including the appId header and "---" separator.'),
       name: z.string().optional().describe('For screenshot: file stem (letters, digits, - and _). Saved as /workspace/group/maestro/<name>.png. Defaults to a generated name.'),
-      device: z.string().optional().describe('Simulator UDID from list_devices. Defaults to the currently booted simulator.'),
+      device: z.string().optional().describe('iOS: simulator UDID. Android: emulator serial (emulator-5554), or the AVD name for boot. Defaults to the booted / only running device.'),
       timeout_seconds: z
         .number()
         .optional()
@@ -678,6 +681,7 @@ GATING: the user must have sent "/simulator on" in this chat. If refused, relay 
         type: 'simulator',
         requestId,
         action: args.action,
+        platform: args.platform,
         flowYaml: args.flow_yaml,
         name: args.name,
         device: args.device,
@@ -742,7 +746,7 @@ GATING: the user must have sent "/simulator on" in this chat. If refused, relay 
       }
 
       const header = [
-        `${args.action}`,
+        `${args.platform} ${args.action}`,
         `exit ${result.exitCode ?? 'n/a'}`,
         `${(result.durationMs / 1000).toFixed(1)}s`,
         result.timedOut ? 'TIMED OUT' : null,
