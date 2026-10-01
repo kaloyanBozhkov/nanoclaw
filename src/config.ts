@@ -69,6 +69,15 @@ export const SIMULATOR_STATE_PATH = path.join(
   'nanoclaw',
   'simulator.json',
 );
+// Git-safety switch: which groups have branch-changing git commands blocked.
+// Same home as godmode, so an agent cannot switch its own guard off. See
+// git-safety.ts.
+export const GIT_SAFETY_STATE_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'git-safety.json',
+);
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const RULES_DIR = path.resolve(PROJECT_ROOT, 'rules');

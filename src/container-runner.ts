@@ -31,6 +31,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { isGitSafetyEnabled } from './git-safety.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -48,6 +49,8 @@ export interface ContainerInput {
   assistantName?: string;
   /** Image file paths (container-relative) to pass as vision input */
   images?: string[];
+  /** Block branch-changing git commands (see git-safety.ts). Set by runContainerAgent. */
+  gitSafety?: boolean;
 }
 
 export interface ContainerOutput {
@@ -672,7 +675,11 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    container.stdin.write(JSON.stringify(input));
+    // Resolved here rather than by callers so every entry point (chat
+    // messages, scheduled tasks) gets the group's current setting.
+    container.stdin.write(
+      JSON.stringify({ ...input, gitSafety: isGitSafetyEnabled(group.folder) }),
+    );
     container.stdin.end();
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive

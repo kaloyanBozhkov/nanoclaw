@@ -71,6 +71,9 @@ import { logDesignAccessStatus } from './design-probe.js';
 import { startLogRotation } from './log-rotate.js';
 import { getGodModeStatus, setGodMode } from './godmode.js';
 import { getSimulatorStatus, setSimulator } from './simulator.js';
+import { getGitSafetyStatus, setGitSafety } from './git-safety.js';
+import { describeGitInfo } from './git-info.js';
+import { formatHelp } from './help.js';
 import { restartContainerRuntime } from './container-runtime.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
@@ -1189,6 +1192,100 @@ async function main(): Promise<void> {
     );
   }
 
+  // "/git-info" — branch of every mounted repo on the user's machine vs the
+  // agent, plus any worktrees. Read-only, so anyone in the chat may ask.
+  async function handleGitInfoCommand(chatJid: string): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+    try {
+      await channel.sendMessage(
+        chatJid,
+        await describeGitInfo(group, group.isMain === true),
+      );
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to collect git info');
+      await channel.sendMessage(chatJid, '⚠️ Failed to read git info.');
+    }
+  }
+
+  // "/git-safety" (status), "/git-safety on", "/git-safety off" — keeps the
+  // agent on the user's checked-out branch (no worktrees, branch switches,
+  // stashes or hard resets). On by default for every chat; only the owner may
+  // flip it. Read at container start, so a change closes the running one.
+  async function handleGitSafetyCommand(
+    chatJid: string,
+    arg: string,
+    isOwner: boolean,
+    sender: string,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    const status = getGitSafetyStatus(group.folder);
+    const describe = () => {
+      const since = status.changedAt
+        ? ` since ${new Date(status.changedAt).toLocaleString('en-GB', { timeZone: TIMEZONE })}`
+        : '';
+      return status.enabled
+        ? `🛡️ git safety is ON${since} — I work on whichever branch you have checked out, with no worktrees, branch switches, stashes or hard resets. Send /git-safety off to lift it.`
+        : `⚠️ git safety is OFF${since} — I may create worktrees and switch branches. Send /git-safety on to restore it.`;
+    };
+
+    if (!arg) {
+      await channel.sendMessage(chatJid, describe());
+      return;
+    }
+
+    if (arg !== 'on' && arg !== 'off') {
+      await channel.sendMessage(
+        chatJid,
+        'Usage: /git-safety (status), /git-safety on, /git-safety off.',
+      );
+      return;
+    }
+
+    if (!isOwner) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ Only the owner can change git safety.',
+      );
+      return;
+    }
+
+    const enabled = arg === 'on';
+    if (enabled === status.enabled) {
+      await channel.sendMessage(chatJid, `Already ${arg}. ${describe()}`);
+      return;
+    }
+
+    try {
+      setGitSafety(group.folder, enabled, sender);
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to persist git safety state');
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ Failed to save git safety setting.',
+      );
+      return;
+    }
+
+    // The flag is baked in at container start: wind down the running one so
+    // the next message starts fresh with the new setting.
+    queue.closeStdin(chatJid);
+
+    await channel.sendMessage(
+      chatJid,
+      (enabled
+        ? "🛡️ git safety ON. I'll stay on whichever branch you have checked out — no worktrees, branch switches, stashes or hard resets."
+        : '⚠️ git safety OFF. I may create worktrees and switch branches again.') +
+        ' Applies from your next message; anything already running finishes under the old setting.',
+    );
+  }
+
   // The model this chat's next container will run on: per-group override
   // (set via /model) or the global default.
   function currentModelId(chatJid: string): string {
@@ -1678,6 +1775,39 @@ async function main(): Promise<void> {
         const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
         handleSimulatorCommand(chatJid, arg, isOwner, msg.sender).catch((err) =>
           logger.error({ err, chatJid }, 'Simulator command error'),
+        );
+        return;
+      }
+
+      // /help — list every intercepted command.
+      if (/^\/help(?:@\S+)?$/i.test(trimmed)) {
+        const channel = findChannel(channels, chatJid);
+        channel
+          ?.sendMessage(chatJid, formatHelp())
+          .catch((err) => logger.error({ err, chatJid }, 'Help command error'));
+        return;
+      }
+
+      // /git-info — branches on the user's machine vs the agent. Also
+      // /gitinfo and /git_info, since Telegram commands can't contain '-'.
+      if (/^\/git[-_]?info(?:@\S+)?$/i.test(trimmed)) {
+        handleGitInfoCommand(chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Git info command error'),
+        );
+        return;
+      }
+
+      // /git-safety [on|off] — keep the agent on the checked-out branch.
+      // Telegram commands can't contain '-', so /gitsafety and /git_safety
+      // work too.
+      const gitSafetyMatch = /^\/git[-_]?safety(?:@\S+)?(?:\s+(.*))?$/i.exec(
+        trimmed,
+      );
+      if (gitSafetyMatch) {
+        const arg = (gitSafetyMatch[1] ?? '').trim().toLowerCase();
+        const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
+        handleGitSafetyCommand(chatJid, arg, isOwner, msg.sender).catch((err) =>
+          logger.error({ err, chatJid }, 'Git safety command error'),
         );
         return;
       }

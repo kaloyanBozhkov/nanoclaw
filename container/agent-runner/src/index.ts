@@ -25,6 +25,11 @@ import {
 import { fileURLToPath } from 'url';
 import { retry } from '@koko420/shared';
 import { getNotionAccessToken } from './notion-token.js';
+import {
+  checkGitSafetyToolUse,
+  GIT_SAFETY_RULES,
+  GIT_SAFETY_TOOL_MATCHER,
+} from './git-safety.js';
 
 // Transient failures worth retrying: rate limits, overloads, and network
 // blips. Permanent failures (refusal, auth, dead session) are not matched —
@@ -47,6 +52,8 @@ interface ContainerInput {
   assistantName?: string;
   /** Image file paths (container-relative) to pass as vision input */
   images?: string[];
+  /** Block branch-changing git commands. Absent (older host) means on. */
+  gitSafety?: boolean;
 }
 
 interface ContainerOutput {
@@ -670,8 +677,7 @@ function createAskUserQuestionHook(
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
           permissionDecision: 'deny',
-          permissionDecisionReason:
-            `The user answered in chat — treat this as the answer to your question and continue, without asking again:\n\n${outcome.message.text}${attached}`,
+          permissionDecisionReason: `The user answered in chat — treat this as the answer to your question and continue, without asking again:\n\n${outcome.message.text}${attached}`,
         },
       };
     }
@@ -685,6 +691,26 @@ function createAskUserQuestionHook(
           outcome.status === 'closed'
             ? 'The chat session was closed before the user answered. Stop and wait for the next message.'
             : 'The user did not answer in time. Proceed with the most reasonable default, say which assumption you made, and ask again in plain text if it turns out to matter.',
+      },
+    };
+  };
+}
+
+/**
+ * Refuse git commands that would move the agent off the user's checked-out
+ * branch or discard their uncommitted work (see git-safety.ts).
+ */
+function createGitSafetyHook(): HookCallback {
+  return async (input) => {
+    const { tool_name, tool_input } = input as PreToolUseHookInput;
+    const reason = checkGitSafetyToolUse(tool_name, tool_input);
+    if (!reason) return {};
+    log(`Git safety blocked ${tool_name}`);
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: reason,
       },
     };
   };
@@ -778,6 +804,14 @@ async function runQuery(
     );
   }
 
+  // Git safety applies to every group, main included, so its rules ride on
+  // the system prompt rather than in global CLAUDE.md (which main skips).
+  const gitSafety = containerInput.gitSafety !== false;
+  const systemAppend =
+    [globalClaudeMd, gitSafety ? GIT_SAFETY_RULES : undefined]
+      .filter(Boolean)
+      .join('\n\n') || undefined;
+
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
   const extraDirs: string[] = [];
@@ -817,11 +851,11 @@ async function runQuery(
         additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
         resume: sessionId,
         resumeSessionAt: resumeAt,
-        systemPrompt: globalClaudeMd
+        systemPrompt: systemAppend
           ? {
               type: 'preset' as const,
               preset: 'claude_code' as const,
-              append: globalClaudeMd,
+              append: systemAppend,
             }
           : undefined,
         allowedTools: [
@@ -937,6 +971,14 @@ async function runQuery(
                 ),
               ],
             },
+            ...(gitSafety
+              ? [
+                  {
+                    matcher: GIT_SAFETY_TOOL_MATCHER,
+                    hooks: [createGitSafetyHook()],
+                  },
+                ]
+              : []),
           ],
         },
       },
@@ -1169,8 +1211,9 @@ async function main(): Promise<void> {
     // covers the other shape of the same problem: a transcript still on disk
     // but stripped of its conversation entries, which fails without ever
     // saying "no conversation found".
-    const isDeadSession =
-      /no conversation found|SESSION_RESUME_FAILED/i.test(errorMessage);
+    const isDeadSession = /no conversation found|SESSION_RESUME_FAILED/i.test(
+      errorMessage,
+    );
     writeOutput({
       status: 'error',
       result: null,

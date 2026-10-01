@@ -243,7 +243,10 @@ async function doRestart(): Promise<RuntimeRestartResult> {
 
     steps.push('relaunched Docker Desktop');
     if (!(await tryRun('open -a Docker'))) {
-      return done(false, 'could not launch Docker Desktop (open -a Docker failed)');
+      return done(
+        false,
+        'could not launch Docker Desktop (open -a Docker failed)',
+      );
     }
   } else {
     return done(false, `unsupported platform: ${process.platform}`);

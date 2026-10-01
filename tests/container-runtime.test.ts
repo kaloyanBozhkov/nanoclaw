@@ -155,9 +155,8 @@ describe('cleanupOrphans', () => {
 
 describe('restartContainerRuntime', () => {
   it('dedupes concurrent calls into one in-flight restart', async () => {
-    const { restartContainerRuntime } = await import(
-      '../src/container-runtime.js'
-    );
+    const { restartContainerRuntime } =
+      await import('../src/container-runtime.js');
     // The module's async path uses promisified exec, which this file does not
     // mock; on an unsupported platform it returns before touching it.
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;

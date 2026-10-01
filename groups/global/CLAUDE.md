@@ -168,7 +168,7 @@ Responsibilities:
 - Browse open issues with `gh issue list -R <owner>/<repo>`
 - Interview users when requirements are vague
 - Verify technical feasibility before handoff
-- Ensure work is scoped to feature branch
+- Ensure work is scoped to the right branch (with git safety on — the default — that's the branch the user has checked out)
 
 Pre-Work Checks:
 1. Check branch state: `cd <project-dir> && git status && git branch`
@@ -432,7 +432,7 @@ If user explicitly stated to work directly on main branch / push to production, 
 Input: Receive validated code from Test Engineer (PASS status).
 
 Responsibilities:
-1. Create a feature branch:
+1. Branch: with git safety on (the default — see the Git Safety section of your system prompt), commit on the branch the user has checked out and skip this step; if that's main/master, ask before committing. Only with git safety off, create a feature branch:
    - Features: `feat/issue-{number}-{slug}`
    - Bug fixes: `fix/issue-{number}-{slug}`
    - No issue number: `feat/{slug}` or `fix/{slug}`
@@ -1139,12 +1139,13 @@ Never commit `.npmrc` — it lives in the container's per-group `$HOME` and is n
 - Never store secrets in memory files or logs — use .env only
 - Critical operations (DB destruction, primary branch mods) require human approval
 - No external data transmission unless defined in DoR
-- Verify branch before implementation — never work directly on primary branches
+- Verify branch before implementation — with git safety on, work on the checked-out branch and ask before committing to a primary branch
 
 ## Git Discipline
 
-- Verify branch before implementation
-- Never work directly on primary branches
+- Verify branch before implementation (`git branch --show-current`) and say which branch you're on
+- Git safety (on by default, toggled by the user with /git-safety): work on the branch the user has checked out, never create worktrees, switch branches, stash or hard-reset; ask before committing to main/master
+- With git safety off: never work directly on primary branches
 - One task → one focus → one commit
 
 
