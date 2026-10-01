@@ -34,6 +34,7 @@ import {
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
+  hostReposForGroup,
 } from './container-runner.js';
 import {
   cleanupOrphans,
@@ -74,6 +75,11 @@ import { getSimulatorStatus, setSimulator } from './simulator.js';
 import { getGitSafetyStatus, setGitSafety } from './git-safety.js';
 import { describeGitInfo } from './git-info.js';
 import { formatHelp } from './help.js';
+import {
+  formatSyncOutcomes,
+  setHostPrismaNotifier,
+  syncHostPrisma,
+} from './host-prisma.js';
 import { restartContainerRuntime } from './container-runtime.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
@@ -1210,6 +1216,28 @@ async function main(): Promise<void> {
     }
   }
 
+  // "/prisma-db-generate" — regenerate the Prisma clients of this chat's
+  // repos on the Mac now, even if the schema is unchanged. Same fixed command
+  // and safety checks as the automatic post-turn sync (see host-prisma.ts),
+  // so anyone in the chat may run it.
+  async function handlePrismaGenerateCommand(chatJid: string): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+    try {
+      const outcomes = await syncHostPrisma(
+        chatJid,
+        hostReposForGroup(group, group.isMain === true),
+        { force: true },
+      );
+      await channel.sendMessage(chatJid, formatSyncOutcomes(outcomes));
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Manual Prisma generate failed');
+      await channel.sendMessage(chatJid, '⚠️ Prisma generate failed to run.');
+    }
+  }
+
   // "/git-safety" (status), "/git-safety on", "/git-safety off" — keeps the
   // agent on the user's checked-out branch (no worktrees, branch switches,
   // stashes or hard resets). On by default for every chat; only the owner may
@@ -1797,6 +1825,15 @@ async function main(): Promise<void> {
         return;
       }
 
+      // /prisma-db-generate — regenerate Prisma clients on the Mac now.
+      // Telegram commands can't contain '-', so _ and no separator work too.
+      if (/^\/prisma[-_]?db[-_]?generate(?:@\S+)?$/i.test(trimmed)) {
+        handlePrismaGenerateCommand(chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Prisma generate command error'),
+        );
+        return;
+      }
+
       // /git-safety [on|off] — keep the agent on the checked-out branch.
       // Telegram commands can't contain '-', so /gitsafety and /git_safety
       // work too.
@@ -1916,6 +1953,15 @@ async function main(): Promise<void> {
     logger.fatal('No channels connected');
     process.exit(1);
   }
+
+  // Host-side Prisma regeneration reports back to the chat it ran for.
+  setHostPrismaNotifier((jid, text) => {
+    findChannel(channels, jid)
+      ?.sendMessage(jid, text)
+      .catch((err) =>
+        logger.warn({ err, jid }, 'Failed to send host Prisma notice'),
+      );
+  });
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({

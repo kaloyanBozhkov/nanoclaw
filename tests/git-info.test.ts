@@ -89,7 +89,14 @@ describe('git info', () => {
 describe('help', () => {
   it('lists the git commands and itself', () => {
     const text = formatHelp();
-    for (const cmd of ['/git-info', '/git-safety', '/help', '/stop', '/info']) {
+    for (const cmd of [
+      '/git-info',
+      '/git-safety',
+      '/prisma-db-generate',
+      '/help',
+      '/stop',
+      '/info',
+    ]) {
       expect(text).toContain(cmd);
     }
   });

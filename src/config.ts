@@ -78,6 +78,14 @@ export const GIT_SAFETY_STATE_PATH = path.join(
   'nanoclaw',
   'git-safety.json',
 );
+// Host Prisma sync: hash of each schema the host last generated a client for.
+// See host-prisma.ts.
+export const HOST_PRISMA_STATE_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'host-prisma.json',
+);
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const RULES_DIR = path.resolve(PROJECT_ROOT, 'rules');

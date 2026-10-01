@@ -2,7 +2,13 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, exec, execSync, spawn } from 'child_process';
+import {
+  ChildProcess,
+  exec,
+  execFileSync,
+  execSync,
+  spawn,
+} from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -32,6 +38,8 @@ import {
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { isGitSafetyEnabled } from './git-safety.js';
+import { HostRepo, scheduleHostPrismaSync } from './host-prisma.js';
+import { prismaOutputDirs } from './prisma-schema.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -383,6 +391,29 @@ function projectArtifactMounts(
   }));
 }
 
+// Generated Prisma clients with a custom `output` inside the project (e.g.
+// packages/prisma/client) are build output just like node_modules: generated
+// in the container they bake in Linux and /workspace paths and break the
+// user's Mac copy. Isolate them too — but only when git ignores the path,
+// which is what proves it's generated and not hand-written source we'd hide.
+function isGitIgnored(projectDir: string, rel: string): boolean {
+  try {
+    execFileSync('git', ['-C', projectDir, 'check-ignore', '-q', rel], {
+      stdio: 'ignore',
+      timeout: 5000,
+    });
+    return true;
+  } catch {
+    return false; // Not ignored, or not a git repo.
+  }
+}
+
+export function isolatedPrismaOutputs(projectDir: string): string[] {
+  return prismaOutputDirs(projectDir).filter((rel) =>
+    isGitIgnored(projectDir, rel),
+  );
+}
+
 // The full artifact-mount set for a container: every project root under the
 // user's repos (/workspace/extra/*) and under the group folder gets its own
 // container-side artifacts, plus the fixed shared caches. Walking every
@@ -416,16 +447,43 @@ export function collectArtifactMounts(
           )
         : path.posix.join('groups', safeGroup, relPosix);
       entries.push(
-        ...projectArtifactMounts(
-          containerProjectDir,
-          storeKey,
+        ...projectArtifactMounts(containerProjectDir, storeKey, [
           // Configured extras are relative to the mounted repo root only.
-          isExtra && !rel ? extraArtifacts : [],
-        ),
+          ...(isExtra && !rel ? extraArtifacts : []),
+          ...isolatedPrismaOutputs(projectDir),
+        ]),
       );
     }
   }
   return entries;
+}
+
+// Writable user repos (/workspace/extra/*) with their project roots — what
+// the host Prisma sync looks at.
+export function hostReposFromMounts(mounts: VolumeMount[]): HostRepo[] {
+  return mounts
+    .filter(
+      (m) => !m.readonly && m.containerPath.startsWith('/workspace/extra/'),
+    )
+    .map((m) => ({
+      name: path.posix.basename(m.containerPath),
+      repoRoot: m.hostPath,
+      projectDirs: findProjectRoots(m.hostPath),
+    }));
+}
+
+/** The same repos for a group, without building its full mount set. */
+export function hostReposForGroup(
+  group: RegisteredGroup,
+  isMain: boolean,
+): HostRepo[] {
+  return hostReposFromMounts(
+    validateAdditionalMounts(
+      group.containerConfig?.additionalMounts ?? [],
+      group.name,
+      isMain,
+    ),
+  );
 }
 
 // Subpath mounts fail unless the directory already exists inside the volume,
@@ -622,6 +680,7 @@ export async function runContainerAgent(
       error: `This chat is set to the Anthropic org "${orgName}", which is no longer configured in .env. Run /org to see what is available, then /switch to one of them.`,
     };
   }
+  const hostRepos = () => hostReposFromMounts(mounts);
   const artifactMounts = collectArtifactMounts(
     mounts,
     group.folder,
@@ -731,6 +790,11 @@ export async function runContainerAgent(
             // Call onOutput for all markers (including null results)
             // so idle timers start even for "silent" query completions.
             outputChain = outputChain.then(() => onOutput(parsed));
+            // A finished turn: bring the Mac's Prisma clients in line with
+            // any schema the agent changed (debounced, host-side only).
+            if (parsed.status === 'success' && !parsed.heartbeat) {
+              scheduleHostPrismaSync(input.chatJid, hostRepos);
+            }
           } catch (err) {
             logger.warn(
               { group: group.name, error: err },

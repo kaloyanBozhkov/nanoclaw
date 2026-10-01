@@ -696,6 +696,12 @@ function createAskUserQuestionHook(
   };
 }
 
+// The host shadows build output in the user's repos with container-only
+// copies (see collectArtifactMounts in the host's container-runner.ts).
+const BUILD_ARTIFACTS_NOTE = `## Build artifacts (container-only)
+
+In repos under /workspace/extra/, node_modules, .next and generated Prisma clients (a gitignored generator \`output\`, e.g. packages/prisma/client) are container-only Linux copies — separate from the user's Mac copies, and empty the first time. If a Prisma client is missing or stale, run the project's own generate script (e.g. \`pnpm db:generate\`) before typechecking or building. When you change schema.prisma, the host regenerates the user's Mac client automatically after your turn — don't ask them to.`;
+
 /**
  * Refuse git commands that would move the agent off the user's checked-out
  * branch or discard their uncommitted work (see git-safety.ts).
@@ -808,7 +814,11 @@ async function runQuery(
   // the system prompt rather than in global CLAUDE.md (which main skips).
   const gitSafety = containerInput.gitSafety !== false;
   const systemAppend =
-    [globalClaudeMd, gitSafety ? GIT_SAFETY_RULES : undefined]
+    [
+      globalClaudeMd,
+      BUILD_ARTIFACTS_NOTE,
+      gitSafety ? GIT_SAFETY_RULES : undefined,
+    ]
       .filter(Boolean)
       .join('\n\n') || undefined;
 

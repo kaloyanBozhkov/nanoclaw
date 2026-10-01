@@ -66,6 +66,16 @@ export const HELP_SECTIONS: HelpSection[] = [
     ],
   },
   {
+    title: '🗄️ Prisma',
+    entries: [
+      {
+        usage: '/prisma-db-generate',
+        description:
+          'Regenerate this chat’s Prisma clients on your Mac now (also runs automatically when the agent changes a schema)',
+      },
+    ],
+  },
+  {
     title: '📌 Memory & context',
     entries: [
       {
@@ -126,7 +136,7 @@ export function formatHelp(): string {
     lines.push('');
   }
   lines.push(
-    '🔒 = owner only. On Telegram, /gitinfo and /gitsafety work too. Anything else goes to the agent.',
+    '🔒 = owner only. On Telegram, /gitinfo, /gitsafety and /prisma_db_generate work too. Anything else goes to the agent.',
   );
   return lines.join('\n');
 }
