@@ -215,3 +215,26 @@ describe('container-runner timeout behavior', () => {
     expect(result.newSessionId).toBe('session-456');
   });
 });
+
+describe('container-runner env', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('enables tool search despite the proxy base URL', async () => {
+    const { spawn } = await import('child_process');
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    const args = vi.mocked(spawn).mock.calls.at(-1)![1] as string[];
+    expect(args).toContain('ENABLE_TOOL_SEARCH=true');
+  });
+});

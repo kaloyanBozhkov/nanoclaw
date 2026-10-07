@@ -536,6 +536,12 @@ function buildContainerArgs(
     '-e',
     `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
   );
+  // Claude Code turns tool search (deferred MCP tool schemas) off when the
+  // base URL isn't a first-party Anthropic host, unless told the proxy passes
+  // tool_reference blocks through. Ours forwards bodies untouched. Without
+  // it every MCP schema rides on every request — Notion alone is ~70k
+  // tokens — and chats with several MCP servers thrash autocompact.
+  args.push('-e', 'ENABLE_TOOL_SEARCH=true');
 
   // Mirror the host's auth method with a placeholder value.
   // API key mode: SDK sends x-api-key, proxy replaces with real key.
