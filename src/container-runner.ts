@@ -38,6 +38,7 @@ import {
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { isGitSafetyEnabled } from './git-safety.js';
+import { disabledMcpServers, isMcpEnabled } from './mcp-tools.js';
 import { HostRepo, scheduleHostPrismaSync } from './host-prisma.js';
 import { prismaOutputDirs } from './prisma-schema.js';
 import { validateAdditionalMounts } from './mount-security.js';
@@ -59,6 +60,8 @@ export interface ContainerInput {
   images?: string[];
   /** Block branch-changing git commands (see git-safety.ts). Set by runContainerAgent. */
   gitSafety?: boolean;
+  /** Optional MCP servers to leave out (see mcp-tools.ts). Set by runContainerAgent. */
+  disabledMcpServers?: string[];
 }
 
 export interface ContainerOutput {
@@ -257,7 +260,7 @@ function buildVolumeMounts(
   // directory is mounted (not just the JSON) so the lockfile lands on a shared
   // host path and serializes refreshes across concurrent containers. Bypasses
   // additionalMounts allowlist because it's internal nanoclaw infra, not user data.
-  if (group.containerConfig?.enableNotion) {
+  if (isMcpEnabled(group, 'notion')) {
     const notionDir = path.join(os.homedir(), '.config', 'nanoclaw', 'notion');
     const notionTokenFile = path.join(notionDir, 'oauth.json');
     if (fs.existsSync(notionTokenFile)) {
@@ -743,7 +746,11 @@ export async function runContainerAgent(
     // Resolved here rather than by callers so every entry point (chat
     // messages, scheduled tasks) gets the group's current setting.
     container.stdin.write(
-      JSON.stringify({ ...input, gitSafety: isGitSafetyEnabled(group.folder) }),
+      JSON.stringify({
+        ...input,
+        gitSafety: isGitSafetyEnabled(group.folder),
+        disabledMcpServers: disabledMcpServers(group),
+      }),
     );
     container.stdin.end();
 

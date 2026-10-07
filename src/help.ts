@@ -35,7 +35,7 @@ export const HELP_SECTIONS: HelpSection[] = [
     ],
   },
   {
-    title: '🧠 Model & account',
+    title: '🧠 Model, account & tools',
     entries: [
       { usage: '/models', description: 'List selectable models' },
       {
@@ -44,6 +44,15 @@ export const HELP_SECTIONS: HelpSection[] = [
         ownerOnly: true,
       },
       { usage: '/org', description: 'Which Anthropic account this chat uses' },
+      {
+        usage: '/tools',
+        description: 'Optional tools (Notion, Design…) and whether they’re on',
+      },
+      {
+        usage: '/tools <name> on|off',
+        description: 'Switch a tool for this chat',
+        ownerOnly: true,
+      },
       {
         usage: '/switch <org>',
         description: 'Switch Anthropic account',

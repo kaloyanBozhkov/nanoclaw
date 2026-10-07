@@ -153,7 +153,11 @@ function mediaKindFor(filePath: string): MediaKind {
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
-  onResetSession: (groupFolder: string, scope?: ResetScope) => void;
+  /** Returns an extra note for the confirmation (e.g. tools switched off). */
+  onResetSession: (
+    groupFolder: string,
+    scope?: ResetScope,
+  ) => string | undefined | void;
   onPreviewReset: (groupFolder: string, scope?: ResetScope) => ResetPreview;
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
@@ -422,7 +426,7 @@ export class TelegramChannel implements Channel {
         // Re-read now: the container has been running since the prompt was
         // shown, so report what actually goes rather than the stale preview.
         const preview = this.opts.onPreviewReset(pending.groupFolder, scope);
-        this.opts.onResetSession(pending.groupFolder, scope);
+        const resetNote = this.opts.onResetSession(pending.groupFolder, scope);
         logger.info(
           {
             chatJid,
@@ -441,7 +445,8 @@ export class TelegramChannel implements Channel {
           ctx,
           `Cleared ${preview.files} file${preview.files === 1 ? '' : 's'} ` +
             `(${formatBytes(preview.bytes)}).${kept} ` +
-            'Next message starts a fresh conversation.',
+            'Next message starts a fresh conversation.' +
+            (resetNote ? `\n${resetNote}` : ''),
         );
       } catch (err) {
         logger.error(

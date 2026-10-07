@@ -4,6 +4,7 @@
  * (host-prisma.ts). Parses just enough of schema.prisma to know which
  * generators run and where they write — never executes anything.
  */
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -107,9 +108,30 @@ export function findSchemaFiles(projectDir: string): string[] {
   return found;
 }
 
+// Prisma copies schema.prisma into its generated client (with a package.json
+// beside it), so that copy looks like a project of its own. Generating from it
+// writes a stray client into a nested folder. Real schemas are committed;
+// copies live in gitignored output dirs — so skip anything git ignores.
+function isGitIgnored(file: string): boolean {
+  try {
+    execFileSync(
+      'git',
+      ['-C', path.dirname(file), 'check-ignore', '-q', file],
+      {
+        stdio: 'ignore',
+        timeout: 5000,
+      },
+    );
+    return true;
+  } catch {
+    return false; // Tracked/untracked-but-not-ignored, or not a git repo.
+  }
+}
+
 export function readPrismaSchemas(projectDir: string): PrismaSchema[] {
   const schemas: PrismaSchema[] = [];
   for (const schemaPath of findSchemaFiles(projectDir)) {
+    if (isGitIgnored(schemaPath)) continue;
     try {
       schemas.push({
         schemaPath,

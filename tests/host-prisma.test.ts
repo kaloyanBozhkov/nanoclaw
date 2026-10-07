@@ -294,3 +294,21 @@ describe('manual /prisma-db-generate (force)', () => {
     expect(text).toContain('🚫 a/y — not run: nope');
   });
 });
+
+describe('generated schema copies', () => {
+  it('skips a schema.prisma that git ignores (Prisma’s copy in its output)', () => {
+    const { repoRoot, projectDir } = makeRepo();
+    execFileSync('git', ['init', '-q'], { cwd: repoRoot });
+    const copyDir = path.join(projectDir, 'client');
+    fs.mkdirSync(copyDir, { recursive: true });
+    fs.writeFileSync(path.join(copyDir, 'package.json'), '{}');
+    fs.writeFileSync(
+      path.join(copyDir, 'schema.prisma'),
+      SCHEMA(SAFE_GENERATOR),
+    );
+    fs.writeFileSync(path.join(repoRoot, '.gitignore'), 'packages/db/client\n');
+
+    expect(readPrismaSchemas(copyDir)).toEqual([]);
+    expect(readPrismaSchemas(projectDir)).toHaveLength(1);
+  });
+});

@@ -76,6 +76,16 @@ import { getGitSafetyStatus, setGitSafety } from './git-safety.js';
 import { describeGitInfo } from './git-info.js';
 import { formatHelp } from './help.js';
 import {
+  findMcpTool,
+  formatToolsStatus,
+  isMcpEnabled,
+  mcpUnavailableReason,
+  TOGGLEABLE_MCP,
+  withMcpSetting,
+  formatResetToolsNote,
+  withResetToolDefaults,
+} from './mcp-tools.js';
+import {
   formatSyncOutcomes,
   setHostPrismaNotifier,
   syncHostPrisma,
@@ -1198,6 +1208,69 @@ async function main(): Promise<void> {
     );
   }
 
+  // "/tools" — which optional MCP servers this chat's agent gets.
+  // "/tools <name> on|off" — switch one (owner only). Read at container
+  // start, so a change closes the running container like /git-safety.
+  async function handleToolsCommand(
+    chatJid: string,
+    arg: string,
+    isOwner: boolean,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    if (!arg) {
+      await channel.sendMessage(chatJid, formatToolsStatus(group));
+      return;
+    }
+
+    const usage = `Usage: /tools, or /tools <name> on|off — names: ${TOGGLEABLE_MCP.map((t) => t.id).join(', ')}.`;
+    const m = /^(\S+)\s+(on|off)$/i.exec(arg);
+    const info = m ? findMcpTool(m[1]) : undefined;
+    if (!m || !info) {
+      await channel.sendMessage(chatJid, usage);
+      return;
+    }
+    if (!isOwner) {
+      await channel.sendMessage(chatJid, '⚠️ Only the owner can change tools.');
+      return;
+    }
+
+    const enabled = m[2].toLowerCase() === 'on';
+    if (isMcpEnabled(group, info.id) === enabled) {
+      await channel.sendMessage(
+        chatJid,
+        `${info.label} is already ${enabled ? 'on' : 'off'} for this chat.`,
+      );
+      return;
+    }
+    const unavailable = enabled ? mcpUnavailableReason(info.id) : null;
+    if (unavailable) {
+      await channel.sendMessage(chatJid, `⚠️ ${unavailable}`);
+      return;
+    }
+
+    const updated = withMcpSetting(group, info.id, enabled);
+    try {
+      setRegisteredGroup(chatJid, updated);
+      registeredGroups[chatJid] = updated;
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to persist tools setting');
+      await channel.sendMessage(chatJid, '⚠️ Failed to save tools setting.');
+      return;
+    }
+
+    // MCP servers are wired at container start: wind down the running one so
+    // the next message starts with the new set.
+    queue.closeStdin(chatJid);
+    await channel.sendMessage(
+      chatJid,
+      `${enabled ? '🟢' : '⚪️'} ${info.label} ${enabled ? 'ON' : 'OFF'} for this chat. Applies from your next message; anything already running finishes as it was.`,
+    );
+  }
+
   // "/git-info" — branch of every mounted repo on the user's machine vs the
   // agent, plus any worktrees. Read-only, so anyone in the chat may ask.
   async function handleGitInfoCommand(chatJid: string): Promise<void> {
@@ -1807,6 +1880,18 @@ async function main(): Promise<void> {
         return;
       }
 
+      // /tools [<name> on|off] — optional MCP servers for this chat.
+      const toolsMatch = /^\/tools(?:@\S+)?(?:\s+(.*))?$/i.exec(trimmed);
+      if (toolsMatch) {
+        const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
+        handleToolsCommand(
+          chatJid,
+          (toolsMatch[1] ?? '').trim(),
+          isOwner,
+        ).catch((err) => logger.error({ err, chatJid }, 'Tools command error'));
+        return;
+      }
+
       // /help — list every intercepted command.
       if (/^\/help(?:@\S+)?$/i.test(trimmed)) {
         const channel = findChannel(channels, chatJid);
@@ -1890,7 +1975,10 @@ async function main(): Promise<void> {
       channel?: string,
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
-    onResetSession: (groupFolder: string, scope: ResetScope = 'all') => {
+    onResetSession: (
+      groupFolder: string,
+      scope: ResetScope = 'all',
+    ): string | undefined => {
       // Stamp before anything else: a container still running right now will
       // report its (about to be deleted) session id when it finally exits, and
       // this is what tells runAgent to throw that id away instead of saving it.
@@ -1900,9 +1988,27 @@ async function main(): Promise<void> {
 
       // Kill the running container so it doesn't resume the dead session.
       // Find the JID for this group folder and signal the container to stop.
+      // A fresh session also starts lean: every default-off tool goes off
+      // until /tools turns it back on, and the confirmation always says so.
+      let toolsNote: string | undefined;
       for (const [jid, group] of Object.entries(registeredGroups)) {
         if (group.folder === groupFolder) {
           queue.closeStdin(jid);
+          const reset = withResetToolDefaults(group);
+          let current = group;
+          if (reset.switchedOff.length > 0) {
+            try {
+              setRegisteredGroup(jid, reset.group);
+              registeredGroups[jid] = reset.group;
+              current = reset.group;
+            } catch (err) {
+              logger.error({ err, jid }, 'Failed to reset tools on /new');
+            }
+          }
+          toolsNote = formatResetToolsNote(
+            current,
+            current === group ? [] : reset.switchedOff,
+          );
           break;
         }
       }
@@ -1927,6 +2033,7 @@ async function main(): Promise<void> {
           'Cleared reset target via /new',
         );
       }
+      return toolsNote;
     },
     onPreviewReset: (groupFolder: string, scope: ResetScope = 'all') =>
       previewReset(groupFolder, scope),

@@ -31,6 +31,9 @@ export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Hard-cap runtime in ms. Falls back to CONTAINER_TIMEOUT.
   enableNotion?: boolean;
+  // Per-chat MCP server switches set via /tools (see mcp-tools.ts). Missing
+  // keys fall back to each server's default (notion: enableNotion).
+  tools?: Record<string, boolean>;
   // Per-group model override (set via /model). Falls back to AGENT_MODEL.
   // Must be one of AVAILABLE_MODELS' ids.
   model?: string;

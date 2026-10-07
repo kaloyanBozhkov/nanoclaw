@@ -238,3 +238,35 @@ describe('container-runner env', () => {
     expect(args).toContain('ENABLE_TOOL_SEARCH=true');
   });
 });
+
+describe('container-runner tool switches', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('tells the runner which MCP servers are off', async () => {
+    let stdin = '';
+    fakeProc.stdin.on('data', (d) => (stdin += d.toString()));
+    const resultPromise = runContainerAgent(
+      { ...testGroup, containerConfig: { tools: { context7: true } } },
+      testInput,
+      () => {},
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    expect(JSON.parse(stdin).disabledMcpServers.sort()).toEqual([
+      'design',
+      'notion',
+      'pencil',
+      'playwright',
+    ]);
+  });
+});

@@ -54,6 +54,8 @@ interface ContainerInput {
   images?: string[];
   /** Block branch-changing git commands. Absent (older host) means on. */
   gitSafety?: boolean;
+  /** Optional MCP servers switched off for this chat via /tools. */
+  disabledMcpServers?: string[];
 }
 
 interface ContainerOutput {
@@ -813,14 +815,34 @@ async function runQuery(
   // Git safety applies to every group, main included, so its rules ride on
   // the system prompt rather than in global CLAUDE.md (which main skips).
   const gitSafety = containerInput.gitSafety !== false;
+  // Tell the agent what's switched off, so it asks for it instead of
+  // concluding the capability doesn't exist or working around it.
+  const offNames = (containerInput.disabledMcpServers ?? []).filter(
+    (n) => n !== 'nanoclaw',
+  );
+  const toolsOffNote =
+    offNames.length > 0
+      ? `## Switched-off tools\n\nThese tool servers are switched off for this chat: ${offNames.join(', ')}. If a task needs one of them, don't work around it or say the capability doesn't exist — stop and ask the user to send \`/tools <name> on\` (e.g. \`/tools ${offNames[0]} on\`), then continue on their next message.`
+      : undefined;
   const systemAppend =
     [
       globalClaudeMd,
       BUILD_ARTIFACTS_NOTE,
       gitSafety ? GIT_SAFETY_RULES : undefined,
+      toolsOffNote,
     ]
       .filter(Boolean)
       .join('\n\n') || undefined;
+
+  // Servers switched off with /tools. nanoclaw is chat I/O and never dropped.
+  const disabled = new Set(
+    (containerInput.disabledMcpServers ?? []).filter((n) => n !== 'nanoclaw'),
+  );
+  if (disabled.size > 0) log(`MCP servers off: ${[...disabled].join(', ')}`);
+  const withoutDisabled = <T extends Record<string, unknown>>(servers: T): T =>
+    Object.fromEntries(
+      Object.entries(servers).filter(([name]) => !disabled.has(name)),
+    ) as T;
 
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
@@ -905,7 +927,7 @@ async function runQuery(
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         settingSources: ['project', 'user'],
-        mcpServers: {
+        mcpServers: withoutDisabled({
           nanoclaw: {
             command: 'node',
             args: [mcpServerPath],
@@ -914,6 +936,10 @@ async function runQuery(
               NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
               NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
             },
+            // Used nearly every turn (acks via send_message). Deferred behind
+            // tool search, the agent guessed its parameters and the first
+            // call failed; its schemas are small enough to always carry.
+            alwaysLoad: true,
           },
           context7: {
             command: 'npx',
@@ -966,7 +992,7 @@ async function runQuery(
                 },
               }
             : {}),
-        },
+        }),
         hooks: {
           PreCompact: [
             { hooks: [createPreCompactHook(containerInput.assistantName)] },
