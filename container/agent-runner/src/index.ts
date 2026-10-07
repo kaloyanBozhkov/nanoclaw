@@ -30,6 +30,7 @@ import {
   GIT_SAFETY_RULES,
   GIT_SAFETY_TOOL_MATCHER,
 } from './git-safety.js';
+import { readRoleFiles, toSubagentDefinitions } from './agent-defs.js';
 
 // Transient failures worth retrying: rate limits, overloads, and network
 // blips. Permanent failures (refusal, auth, dead session) are not matched —
@@ -844,6 +845,13 @@ async function runQuery(
       Object.entries(servers).filter(([name]) => !disabled.has(name)),
     ) as T;
 
+  // Dev-team roles from groups/global/agents/*.md, registered as subagent
+  // types so their full definitions never sit in the orchestrator's prompt.
+  const subagents = toSubagentDefinitions(readRoleFiles());
+  if (Object.keys(subagents).length > 0) {
+    log(`Subagent types: ${Object.keys(subagents).join(', ')}`);
+  }
+
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
   const extraDirs: string[] = [];
@@ -927,6 +935,7 @@ async function runQuery(
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         settingSources: ['project', 'user'],
+        agents: subagents,
         mcpServers: withoutDisabled({
           nanoclaw: {
             command: 'node',

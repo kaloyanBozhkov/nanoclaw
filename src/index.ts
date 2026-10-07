@@ -75,6 +75,7 @@ import { getSimulatorStatus, setSimulator } from './simulator.js';
 import { getGitSafetyStatus, setGitSafety } from './git-safety.js';
 import { describeGitInfo } from './git-info.js';
 import { formatHelp } from './help.js';
+import { formatAgents, listAgentRoles } from './agents.js';
 import {
   findMcpTool,
   formatToolsStatus,
@@ -1877,6 +1878,16 @@ async function main(): Promise<void> {
         handleSimulatorCommand(chatJid, arg, isOwner, msg.sender).catch((err) =>
           logger.error({ err, chatJid }, 'Simulator command error'),
         );
+        return;
+      }
+
+      // /agents — dev-team roles registered from groups/global/agents/.
+      if (/^\/agents(?:@\S+)?$/i.test(trimmed)) {
+        findChannel(channels, chatJid)
+          ?.sendMessage(chatJid, formatAgents(listAgentRoles()))
+          .catch((err) =>
+            logger.error({ err, chatJid }, 'Agents command error'),
+          );
         return;
       }
 

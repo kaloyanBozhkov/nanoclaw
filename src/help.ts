@@ -45,6 +45,10 @@ export const HELP_SECTIONS: HelpSection[] = [
       },
       { usage: '/org', description: 'Which Anthropic account this chat uses' },
       {
+        usage: '/agents',
+        description: 'Dev-team roles the agent can spawn',
+      },
+      {
         usage: '/tools',
         description: 'Optional tools (Notion, Design…) and whether they’re on',
       },
