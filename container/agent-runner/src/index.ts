@@ -703,7 +703,7 @@ function createAskUserQuestionHook(
 // copies (see collectArtifactMounts in the host's container-runner.ts).
 const BUILD_ARTIFACTS_NOTE = `## Build artifacts (container-only)
 
-In repos under /workspace/extra/, node_modules, .next and generated Prisma clients (a gitignored generator \`output\`, e.g. packages/prisma/client) are container-only Linux copies — separate from the user's Mac copies, and empty the first time. If a Prisma client is missing or stale, run the project's own generate script (e.g. \`pnpm db:generate\`) before typechecking or building. When you change schema.prisma, the host regenerates the user's Mac client automatically after your turn — don't ask them to.`;
+In repos under /workspace/extra/, node_modules, .next and generated Prisma clients (a gitignored generator \`output\`, e.g. packages/prisma/client) are container-only Linux copies — separate from the user's Mac copies, and empty the first time. If a Prisma client is missing or stale, run \`prisma generate\` itself (e.g. \`pnpm exec prisma generate\`, or a script whose body is exactly that) before typechecking or building — check package.json first: in some repos \`db:generate\` means \`prisma migrate dev\`, which changes the database and must never be run without the owner asking. When you change schema.prisma, the host regenerates the user's Mac client automatically after your turn — don't ask them to.`;
 
 /**
  * Refuse git commands that would move the agent off the user's checked-out
