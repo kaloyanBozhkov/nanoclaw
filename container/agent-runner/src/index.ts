@@ -847,7 +847,13 @@ async function runQuery(
 
   // Dev-team roles from groups/global/agents/*.md, registered as subagent
   // types so their full definitions never sit in the orchestrator's prompt.
-  const subagents = toSubagentDefinitions(readRoleFiles());
+  // Subagents don't inherit this prompt's appended sections, so the Git Safety
+  // rules ride on each role too — the hook blocks them either way, but this
+  // way they know why and ask instead of retrying.
+  const subagents = toSubagentDefinitions(
+    readRoleFiles(),
+    gitSafety ? GIT_SAFETY_RULES : undefined,
+  );
   if (Object.keys(subagents).length > 0) {
     log(`Subagent types: ${Object.keys(subagents).join(', ')}`);
   }

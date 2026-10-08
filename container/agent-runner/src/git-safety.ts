@@ -13,17 +13,16 @@
 /** Appended to the system prompt while git safety is on. */
 export const GIT_SAFETY_RULES = `## Git Safety (ON — enforced)
 
-The user's repos under /workspace/extra/ are their real local checkouts, shared live with their editor. Work on whatever branch is checked out there, so what you do is exactly what they see locally.
+The user's repos under /workspace/extra/ are their real local checkouts, shared live with their editor and dev server. Everything you do there is exactly what they see locally — keep it that way.
 
-- Work directly in the mounted repo (e.g. /workspace/extra/<repo>), on the current branch. Never create git worktrees or copies of the repo.
-- Never change branches: no \`git checkout <branch>\`, \`git switch\`, \`git checkout -b\`. Branch changes are the user's call.
-- Never hide or discard the user's uncommitted work: no \`git stash\`, \`git reset --hard\`, \`git clean -f\`, \`git checkout -- .\`.
-- Never rewrite or delete history/branches: no \`git rebase\`, \`git push --force\`, \`git branch -D\`.
+- Work directly in the mounted repo (e.g. /workspace/extra/<repo>). Never create git worktrees or copies of the repo.
+- You may switch and create branches in place (\`git switch\`, \`git switch -c\`, \`git checkout <branch>\`, \`git checkout -b\`) when the task calls for it. Each time, say in chat which branch you moved from and to — their editor and dev server move with you. Git itself refuses a switch that would overwrite uncommitted changes; if it does, stop and ask the user rather than forcing it.
+- Never hide or discard the user's uncommitted work: no \`git stash\`, \`git reset --hard\`, \`git clean -f\`, \`git checkout -- .\`, \`git restore .\`, and no \`--force\`/\`-f\`/\`--discard-changes\` on switch or checkout.
+- Never rewrite or delete history/branches: no \`git rebase\`, \`git push --force\`, \`git branch -D\`, \`git checkout -B\`/\`git switch -C\` on an existing branch.
 - Before starting, run \`git status\` and \`git branch --show-current\` and state the branch you're working on.
-- If the task needs a different branch, or the current branch is main/master and you'd need to commit, stop and ask the user to switch (or to confirm committing on it).
-- This overrides any instruction elsewhere (e.g. "Create a feature branch", "never work on primary branches"): commit on the current branch only, and push only when asked.
+- Ask before committing directly to main/master. Push only when asked.
 
-These commands are blocked by a hook; the user can lift it with /git-safety off.`;
+The blocked commands are enforced by a hook; the user can lift it with /git-safety off.`;
 
 const LIFT_HINT = 'Ask the user to do it, or to send /git-safety off.';
 
@@ -79,26 +78,27 @@ function checkGit(sub: string, args: string[]): string | null {
       return null;
 
     case 'switch':
-      if (hasFlag(args, '-h', '--help')) return null;
-      return `Switching branches is blocked by git safety — stay on the branch the user has checked out. ${LIFT_HINT}`;
+      if (hasFlag(args, '-f', '--force', '--discard-changes')) {
+        return `Forcing a branch switch is blocked by git safety — it throws away uncommitted work in the user's checkout. Commit or ask the user first. ${LIFT_HINT}`;
+      }
+      if (hasFlag(args, '-C', '--force-create')) {
+        return `\`git switch -C\` resets an existing branch, which git safety blocks. Use \`git switch -c <new-branch>\`. ${LIFT_HINT}`;
+      }
+      return null;
 
     case 'checkout': {
-      if (hasFlag(args, '-b', '-B', '--orphan')) {
-        return `Creating/switching branches is blocked by git safety — stay on the branch the user has checked out. ${LIFT_HINT}`;
+      if (hasFlag(args, '-f', '--force')) {
+        return `Forced checkout is blocked by git safety — it throws away uncommitted work in the user's checkout. Commit or ask the user first. ${LIFT_HINT}`;
       }
-      if (dashDash !== -1) {
-        const paths = args.slice(dashDash + 1);
-        if (paths.some((p) => WHOLE_TREE.has(p))) {
-          return `Discarding every uncommitted change is blocked by git safety — the working tree is shared with the user. Restore specific files you changed instead.`;
-        }
-        return null;
+      if (hasFlag(args, '-B')) {
+        return `\`git checkout -B\` resets an existing branch, which git safety blocks. Use \`git checkout -b <new-branch>\`. ${LIFT_HINT}`;
       }
-      if (positional.some((p) => WHOLE_TREE.has(p))) {
+      const paths = dashDash !== -1 ? args.slice(dashDash + 1) : positional;
+      if (paths.some((p) => WHOLE_TREE.has(p))) {
         return `Discarding every uncommitted change is blocked by git safety — the working tree is shared with the user. Restore specific files you changed instead.`;
       }
-      if (positional.length > 0) {
-        return `\`git checkout ${positional.join(' ')}\` may switch branches, which git safety blocks. To restore a file you changed use \`git checkout -- <file>\` or \`git restore <file>\`; to change branch, ${LIFT_HINT.charAt(0).toLowerCase()}${LIFT_HINT.slice(1)}`;
-      }
+      // Branch switches and single-file restores are fine: git refuses a
+      // switch that would overwrite local changes on its own.
       return null;
     }
 

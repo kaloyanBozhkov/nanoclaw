@@ -95,6 +95,8 @@ export interface SubagentDefinition {
 /** SDK `agents` option: every role except orchestrators. */
 export function toSubagentDefinitions(
   roles: RoleFile[],
+  /** Extra session rules every subagent must see (e.g. Git Safety when on). */
+  sharedRules?: string,
 ): Record<string, SubagentDefinition> {
   const out: Record<string, SubagentDefinition> = {};
   for (const r of roles) {
@@ -104,7 +106,8 @@ export function toSubagentDefinitions(
       prompt:
         `${r.body}\n\n---\n\nYou are running as the ${r.title} subagent. ` +
         `Report progress to the chat with \`mcp__nanoclaw__send_message\`, ` +
-        `using \`sender: "${r.title}"\`.`,
+        `using \`sender: "${r.title}"\`.` +
+        (sharedRules ? `\n\n${sharedRules}` : ''),
     };
   }
   return out;

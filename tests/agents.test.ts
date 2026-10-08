@@ -52,6 +52,17 @@ describe('role files (runner)', () => {
     expect(defs.a.prompt).toContain('sender: "🦫 a"');
   });
 
+  it('appends shared rules (Git Safety) to every role when given', () => {
+    const d = dir({ 'a.md': FILE('a', 'pipeline') });
+    expect(
+      toSubagentDefinitions(readRoleFiles([d]), '## Git Safety (ON — enforced)')
+        .a.prompt,
+    ).toContain('## Git Safety (ON — enforced)');
+    expect(toSubagentDefinitions(readRoleFiles([d])).a.prompt).not.toContain(
+      'Git Safety',
+    );
+  });
+
   it('falls back to the next directory', () => {
     const d = dir({ 'a.md': FILE('a', 'standalone') });
     expect(readRoleFiles(['/nonexistent', d]).map((r) => r.name)).toEqual([

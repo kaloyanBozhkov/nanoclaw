@@ -279,13 +279,12 @@ Never commit `.npmrc` — it lives in the container's per-group `$HOME` and is n
 - Never store secrets in memory files or logs — use .env only
 - Critical operations (DB destruction, primary branch mods) require human approval
 - No external data transmission unless defined in DoR
-- Verify branch before implementation — with git safety on, work on the checked-out branch and ask before committing to a primary branch
+- Verify branch before implementation — prefer a feature branch over committing straight to main/master
 
 ## Git Discipline
 
 - Verify branch before implementation (`git branch --show-current`) and say which branch you're on
-- Git safety (on by default, toggled by the user with /git-safety): work on the branch the user has checked out, never create worktrees, switch branches, stash or hard-reset; ask before committing to main/master
-- With git safety off: never work directly on primary branches
+- Work in the mounted repo itself so the user sees every edit, commit and branch switch live — switch or create branches in place and say so in chat. Git safety is a per-chat switch (/git-safety): when a "Git Safety (ON — enforced)" section is in your system prompt, follow it (no worktrees, no stash/hard reset/forced checkout/rebase/force-push). Without that section those are allowed, but never discard the user's uncommitted work without asking
 - One task → one focus → one commit
 
 

@@ -56,15 +56,18 @@ describe('git safety switch (host)', () => {
 
 describe('checkGitCommand (container hook)', () => {
   const blocked = [
+    'git switch -f main',
+    'git switch --discard-changes main',
+    'git switch -C feat/existing',
+    'git checkout -f main',
+    'git checkout --force main',
+    'git checkout -B feat/existing origin/main',
+    'sh -c "git checkout -f main"',
+    'git status; git switch --force main',
     'git worktree add /workspace/group/wt-x -b feat/x',
     'cd /workspace/extra/linkbase && git worktree add ../wt-y',
     'git -C /workspace/extra/linkbase worktree add wt',
-    'git switch main',
-    'git switch -c feat/new',
-    'git checkout main',
-    'git checkout -b feat/new',
     'git checkout -B feat/new origin/main',
-    'git checkout --orphan gh-pages',
     'git checkout .',
     'git checkout -- .',
     'git restore .',
@@ -83,17 +86,18 @@ describe('checkGitCommand (container hook)', () => {
     'git push origin +feat/x',
     'git branch -D feat/old',
     'git branch -m new-name',
-    'git --no-pager checkout main',
-    'sh -c "git switch main"',
-    'echo $(git checkout main)',
-    '/usr/bin/git switch main',
-    'git status; git checkout main',
   ];
   it.each(blocked)('blocks %s', (cmd) => {
     expect(checkGitCommand(cmd)).toEqual(expect.any(String));
   });
 
   const allowed = [
+    'git switch main',
+    'git switch -c feat/new',
+    'git checkout main',
+    'git checkout -b feat/new',
+    'git --no-pager checkout main',
+    'cd /workspace/extra/linkbase && git switch feat/x && git pull',
     'git status',
     'git branch --show-current',
     'git branch',
@@ -148,8 +152,11 @@ describe('checkGitSafetyToolUse (container hook)', () => {
 
   it('checks Bash commands', () => {
     expect(
-      checkGitSafetyToolUse('Bash', { command: 'git switch main' }),
+      checkGitSafetyToolUse('Bash', { command: 'git switch -f main' }),
     ).toEqual(expect.any(String));
+    expect(
+      checkGitSafetyToolUse('Bash', { command: 'git switch main' }),
+    ).toBeNull();
     expect(checkGitSafetyToolUse('Bash', { command: 'git status' })).toBeNull();
   });
 
