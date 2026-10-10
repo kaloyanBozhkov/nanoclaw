@@ -290,8 +290,7 @@ function shortTime(iso: string): string {
 
 /**
  * The one view behind /consume, /consumables and /consumed: everything
- * available, with what's already loaded marked. Telegram formatting — single
- * asterisks for bold, never markdown.
+ * available, with what's already loaded marked.
  */
 export function formatConsumablesMenu(
   items: Consumable[],

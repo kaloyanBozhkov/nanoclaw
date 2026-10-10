@@ -2,7 +2,15 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi,
+  type Mock,
+} from 'vitest';
 
 const tmpRoot = vi.hoisted(() => ({ dir: '' }));
 
@@ -23,6 +31,29 @@ vi.mock('../src/config.js', () => ({
 vi.mock('../src/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
+const project = vi.hoisted(() => ({
+  remote: null as string | null,
+  setUp: null as unknown as Mock<(...args: unknown[]) => Promise<string>>,
+}));
+vi.mock('../src/project-setup.js', async () => {
+  const { vi } = await import('vitest');
+  project.setUp = vi.fn(async () => 'https://github.com/me/side-project');
+  return {
+    projectSlug: (name: string) =>
+      name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+    projectMount: (slug: string) => ({
+      hostPath: `~/Documents/koko/${slug}`,
+      containerPath: slug,
+      readonly: false,
+    }),
+    ensureProjectDir: (slug: string) => ({
+      dir: `/koko/${slug}`,
+      existed: false,
+    }),
+    gitRemote: async () => project.remote,
+    setUpGitHubRepo: (...args: unknown[]) => project.setUp(...args),
+  };
+});
 vi.mock('../src/transcribe.js', () => ({
   transcribeVoice: vi.fn(() => 'hello there'),
 }));
@@ -86,6 +117,7 @@ function makeOpts(registered = true) {
         { kind: 'cache', label: 'Cache', paths: [], files: 1, entries: [] },
       ],
     })),
+    registerGroup: vi.fn(),
     registeredGroups: vi.fn(() =>
       registered
         ? {
@@ -475,7 +507,107 @@ describe('MatrixChannel', () => {
       expect(client.createRoom).toHaveBeenCalledWith('Side project', [
         '@owner:test',
       ]);
-      expect(sentBodies(client).at(-1)).toContain('mx:!new:test');
+      expect(sentBodies(client).join('\n')).toContain('mx:!new:test');
+    });
+
+    it('/mxroom registers the room as a project with its folder mounted', async () => {
+      await say('/mxroom Side project');
+      expect(opts.registerGroup).toHaveBeenCalledWith(
+        'mx:!new:test',
+        expect.objectContaining({
+          name: 'Side project',
+          folder: 'side-project',
+          requiresTrigger: false,
+          containerConfig: {
+            additionalMounts: [
+              {
+                hostPath: '~/Documents/koko/side-project',
+                containerPath: 'side-project',
+                readonly: false,
+              },
+            ],
+          },
+        }),
+      );
+    });
+
+    it('/mxroom refuses a folder that is already registered', async () => {
+      await say('/mxroom Project');
+      expect(client.createRoom).not.toHaveBeenCalled();
+      expect(opts.registerGroup).not.toHaveBeenCalled();
+      expect(sentBodies(client).at(-1)).toContain('already exists');
+    });
+
+    describe('git setup question in the new room', () => {
+      const NEW_ROOM = '!new:test';
+      const answer = (body: string, sender = '@owner:test') =>
+        ch.processSync(
+          {
+            next_batch: 'sY',
+            rooms: {
+              join: {
+                [NEW_ROOM]: {
+                  timeline: {
+                    events: [msg({ msgtype: 'm.text', body }, sender)],
+                  },
+                },
+              },
+            },
+          },
+          { deliver: true },
+        );
+      const roomBodies = () =>
+        client.sendEvent.mock.calls
+          .filter((c) => c[0] === NEW_ROOM)
+          .map((c) => c[2].body as string);
+
+      beforeEach(() => {
+        project.remote = null;
+        project.setUp.mockClear();
+      });
+
+      it('asks in the new room and sets up GitHub on yes', async () => {
+        await say('/mxroom Side project');
+        expect(roomBodies().at(-1)).toContain('Reply **yes** or **no**');
+
+        await answer('maybe', '@other:test'); // not the asker: ignored
+        await answer('yes');
+        expect(project.setUp).toHaveBeenCalledWith(
+          '/koko/side-project',
+          'side-project',
+          'Side project',
+        );
+        expect(roomBodies().at(-1)).toContain(
+          'https://github.com/me/side-project',
+        );
+        expect(opts.onMessage).not.toHaveBeenCalledWith(
+          'mx:!new:test',
+          expect.objectContaining({ content: 'yes' }),
+        );
+      });
+
+      it('does nothing on no, and only asks once', async () => {
+        await say('/mxroom Side project');
+        await answer('no');
+        await answer('yes');
+        expect(project.setUp).not.toHaveBeenCalled();
+        expect(roomBodies()).toContain('OK, no git setup.');
+      });
+
+      it('skips the question when the folder already has a remote', async () => {
+        project.remote = 'git@github.com:me/side-project.git';
+        await say('/mxroom Side project');
+        expect(roomBodies().at(-1)).toContain('already a git repo');
+        await answer('yes');
+        expect(project.setUp).not.toHaveBeenCalled();
+      });
+
+      it('reports a failed setup', async () => {
+        project.setUp.mockRejectedValueOnce(new Error('name already exists'));
+        await say('/mxroom Side project');
+        await answer('yes');
+        expect(roomBodies().at(-1)).toContain('name already exists');
+      });
     });
   });
 

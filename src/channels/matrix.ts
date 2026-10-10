@@ -13,7 +13,15 @@ import {
   TRIGGER_PATTERN,
 } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { isValidGroupFolder } from '../group-folder.js';
 import { logger } from '../logger.js';
+import {
+  ensureProjectDir,
+  gitRemote,
+  projectMount,
+  projectSlug,
+  setUpGitHubRepo,
+} from '../project-setup.js';
 import {
   formatBytes,
   formatResetFileList,
@@ -222,7 +230,24 @@ export interface MatrixChannelOpts {
   ) => string | undefined | void;
   onPreviewReset: (groupFolder: string, scope?: ResetScope) => ResetPreview;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  /** Register a new chat as a NanoClaw group (used by `/mxroom`). */
+  registerGroup?: (jid: string, group: RegisteredGroup) => void;
 }
+
+/** A `/mxroom` project waiting for a yes/no on git + GitHub setup. */
+interface PendingGitSetup {
+  dir: string;
+  slug: string;
+  title: string;
+  senderId: string;
+}
+
+const YES_NO: Record<string, boolean> = {
+  yes: true,
+  y: true,
+  no: false,
+  n: false,
+};
 
 interface PendingReset {
   groupFolder: string;
@@ -264,6 +289,7 @@ export class MatrixChannel implements Channel {
   private memberNames = new Map<string, Map<string, string>>();
   /** Unanswered `/new` confirmations, keyed by chat JID. */
   private pendingResets = new Map<string, PendingReset>();
+  private pendingGitSetups = new Map<string, PendingGitSetup>();
 
   constructor(
     private client: MatrixClient,
@@ -636,6 +662,16 @@ export class MatrixChannel implements Channel {
     sender: string,
     body: string,
   ): Promise<boolean> {
+    const gitSetup = this.pendingGitSetups.get(chatJid);
+    if (gitSetup && gitSetup.senderId === sender) {
+      const yes = YES_NO[body.toLowerCase().replace(/[.!]+$/, '')];
+      if (yes !== undefined) {
+        this.pendingGitSetups.delete(chatJid);
+        await this.answerGitSetup(chatJid, gitSetup, yes);
+        return true;
+      }
+    }
+
     const pending = this.pendingResets.get(chatJid);
     if (pending && pending.senderId === sender) {
       const answer = RESET_ANSWERS[body.toLowerCase().replace(/[.!]+$/, '')];
@@ -751,7 +787,11 @@ export class MatrixChannel implements Channel {
     );
   }
 
-  /** `/mxroom <name>` — a new unencrypted room with the asker invited. */
+  /**
+   * `/mxroom <name>` — a new project: an unencrypted room with the asker
+   * invited, registered as a NanoClaw group, with ~/Documents/koko/<slug>
+   * mounted read-write. The new room then asks whether to set up git + GitHub.
+   */
   private async createRoomFor(
     chatJid: string,
     sender: string,
@@ -765,12 +805,92 @@ export class MatrixChannel implements Channel {
       await this.sendMessage(chatJid, 'Usage: /mxroom <name>');
       return;
     }
+    const slug = projectSlug(name);
+    if (!isValidGroupFolder(slug)) {
+      await this.sendMessage(
+        chatJid,
+        `⚠️ Can't make a folder name from "${name}". Use letters or digits.`,
+      );
+      return;
+    }
+    const groups = this.opts.registeredGroups();
+    if (Object.values(groups).some((g) => g.folder === slug)) {
+      await this.sendMessage(
+        chatJid,
+        `⚠️ A project with folder \`${slug}\` already exists.`,
+      );
+      return;
+    }
+    if (!this.opts.registerGroup) {
+      await this.sendMessage(chatJid, '⚠️ Group registration is unavailable.');
+      return;
+    }
+
+    const { dir, existed } = ensureProjectDir(slug);
     const { room_id } = await this.client.createRoom(name, [sender]);
+    const jid = `${MATRIX_JID_PREFIX}${room_id}`;
     this.roomNames.set(room_id, name);
+    const mount = projectMount(slug);
+    this.opts.registerGroup(jid, {
+      name,
+      folder: slug,
+      trigger: `@${ASSISTANT_NAME}`,
+      added_at: new Date().toISOString(),
+      requiresTrigger: false,
+      containerConfig: { additionalMounts: [mount] },
+    });
+
     await this.sendMessage(
       chatJid,
-      `Created *${name}* and invited you. Chat ID: \`${MATRIX_JID_PREFIX}${room_id}\``,
+      [
+        `Created **${name}** and invited you.`,
+        `- Chat ID: \`${jid}\``,
+        `- Project folder: \`${slug}\``,
+        `- Mounted: \`${mount.hostPath}\`${existed ? ' (existing folder)' : ''}`,
+      ].join('\n'),
     );
+
+    const remote = await gitRemote(dir);
+    if (remote) {
+      await this.sendMessage(
+        jid,
+        `👋 **${name}** is ready. \`${mount.hostPath}\` is already a git repo (origin: ${remote}).`,
+      );
+      return;
+    }
+    this.pendingGitSetups.set(jid, {
+      dir,
+      slug,
+      title: name,
+      senderId: sender,
+    });
+    await this.sendMessage(
+      jid,
+      `👋 **${name}** is ready, working in \`${mount.hostPath}\`.\n\nSet up git and a new private GitHub repo **${slug}**? Reply **yes** or **no**.`,
+    );
+  }
+
+  private async answerGitSetup(
+    chatJid: string,
+    setup: PendingGitSetup,
+    yes: boolean,
+  ): Promise<void> {
+    if (!yes) {
+      await this.sendMessage(chatJid, 'OK, no git setup.');
+      return;
+    }
+    await this.sendMessage(chatJid, 'Setting up git and GitHub…');
+    try {
+      const url = await setUpGitHubRepo(setup.dir, setup.slug, setup.title);
+      await this.sendMessage(chatJid, `✅ Pushed to ${url}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ err: msg, dir: setup.dir }, 'Matrix: git setup failed');
+      await this.sendMessage(
+        chatJid,
+        `⚠️ Git setup failed:\n\`\`\`\n${msg.slice(0, 1500)}\n\`\`\``,
+      );
+    }
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {

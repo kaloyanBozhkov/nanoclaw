@@ -446,7 +446,7 @@ function formatStopSummary(
   if (activity?.lastText) {
     const snippet = activity.lastText.slice(0, 400);
     parts.push(
-      `\n*Last message:*\n${snippet}${activity.lastText.length > 400 ? '…' : ''}`,
+      `\n**Last message:**\n${snippet}${activity.lastText.length > 400 ? '…' : ''}`,
     );
   }
   if (activity?.lastTool) {
@@ -588,13 +588,13 @@ function formatInfoSummary(
   mainActivity: ReturnType<typeof extractLastActivity>,
   subagents: SubagentActivity[],
 ): string {
-  const parts: string[] = ['ℹ️ *Status*'];
+  const parts: string[] = ['ℹ️ **Status**'];
   const startedAt = parseContainerStartedAt(containerName);
   if (startedAt) {
     parts.push(`Container running for ${formatUptime(startedAt)}.`);
   }
 
-  parts.push('\n*Main agent:*');
+  parts.push('\n**Main agent:**');
   if (mainActivity?.lastTool) {
     parts.push(formatToolLine(mainActivity.lastTool));
   }
@@ -609,7 +609,7 @@ function formatInfoSummary(
   if (subagents.length === 0) {
     parts.push('\n_No subagents running._');
   } else {
-    parts.push(`\n*Subagents (${subagents.length}):*`);
+    parts.push(`\n**Subagents (${subagents.length}):**`);
     for (const sa of subagents) {
       const label = sa.teammateId ?? sa.agentId;
       const summary = sa.summary ? ` — ${sa.summary}` : '';
@@ -2049,6 +2049,7 @@ async function main(): Promise<void> {
     onPreviewReset: (groupFolder: string, scope: ResetScope = 'all') =>
       previewReset(groupFolder, scope),
     registeredGroups: () => registeredGroups,
+    registerGroup,
   };
 
   // Create and connect all registered channels.

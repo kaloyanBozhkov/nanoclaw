@@ -13,6 +13,8 @@ export interface ChannelOpts {
   /** What `onResetSession` would delete, for a confirmation prompt. */
   onPreviewReset: (groupFolder: string, scope?: ResetScope) => ResetPreview;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  /** Register a new chat as a group (channels that can create chats). */
+  registerGroup?: (jid: string, group: RegisteredGroup) => void;
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;
