@@ -48,6 +48,11 @@ export class MatrixApiError extends Error {
   }
 }
 
+/** How often a rate-limited (429) request is retried before giving up. */
+const MAX_RATE_LIMIT_RETRIES = 5;
+/** Longest single wait honoured from a 429's retry_after_ms. */
+const MAX_RETRY_WAIT_MS = 120_000;
+
 export class MatrixClient {
   private txnCounter = 0;
 
@@ -65,24 +70,32 @@ export class MatrixClient {
     body?: unknown,
     opts: { signal?: AbortSignal } = {},
   ): Promise<T> {
-    const res = await this.fetchImpl(`${this.homeserver}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: opts.signal,
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      let errcode: string | undefined;
+    for (let attempt = 0; ; attempt++) {
+      const res = await this.fetchImpl(`${this.homeserver}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: opts.signal,
+      });
+      const text = await res.text();
+      if (res.ok) return (text ? JSON.parse(text) : {}) as T;
+
+      let parsed: { errcode?: string; retry_after_ms?: number } = {};
       try {
-        errcode = JSON.parse(text).errcode;
+        parsed = JSON.parse(text);
       } catch {}
-      throw new MatrixApiError(method, path, res.status, errcode, text);
+      // Synapse throttles bursts (e.g. creating many rooms) and says how long
+      // to wait; honour it rather than failing the caller.
+      if (res.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+        const wait = Math.min(parsed.retry_after_ms ?? 5000, MAX_RETRY_WAIT_MS);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      throw new MatrixApiError(method, path, res.status, parsed.errcode, text);
     }
-    return (text ? JSON.parse(text) : {}) as T;
   }
 
   /** Unique per process — Matrix dedupes sends by (device, txnId). */
@@ -138,6 +151,10 @@ export class MatrixClient {
       `/_matrix/client/v3/join/${encodeURIComponent(roomId)}`,
       {},
     );
+  }
+
+  joinedRooms(): Promise<{ joined_rooms: string[] }> {
+    return this.request('GET', '/_matrix/client/v3/joined_rooms');
   }
 
   leaveRoom(roomId: string): Promise<unknown> {

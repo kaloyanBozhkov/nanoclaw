@@ -82,17 +82,27 @@ describe('migrateToMatrix', () => {
   let createRoom: Mock<
     (name: string, invite: string[]) => Promise<{ room_id: string }>
   >;
+  let client: {
+    createRoom: typeof createRoom;
+    joinedRooms: Mock<() => Promise<{ joined_rooms: string[] }>>;
+    getStateEvent: Mock<(roomId: string, type: string) => Promise<any>>;
+  };
 
   beforeEach(() => {
     db = seed();
     let i = 0;
     createRoom = vi.fn(async () => ({ room_id: `!room${++i}:x` }));
+    client = {
+      createRoom,
+      joinedRooms: vi.fn(async () => ({ joined_rooms: [] })),
+      getStateEvent: vi.fn(async () => ({})),
+    };
   });
 
   it('creates a room per group, inviting the owner, main first and renamed', async () => {
     const moved = await migrateToMatrix({
       db,
-      client: { createRoom },
+      client,
       owner: '@koko:x',
       log: () => {},
     });
@@ -113,7 +123,7 @@ describe('migrateToMatrix', () => {
   it('changes nothing on a dry run', async () => {
     await migrateToMatrix({
       db,
-      client: { createRoom },
+      client,
       owner: '@koko:x',
       dryRun: true,
       log: () => {},
@@ -131,18 +141,38 @@ describe('migrateToMatrix', () => {
   it('skips groups that already moved when rerun', async () => {
     await migrateToMatrix({
       db,
-      client: { createRoom },
+      client,
       owner: '@koko:x',
       log: () => {},
     });
     createRoom.mockClear();
     const again = await migrateToMatrix({
       db,
-      client: { createRoom },
+      client,
       owner: '@koko:x',
       log: () => {},
     });
     expect(again).toEqual([]);
     expect(createRoom).not.toHaveBeenCalled();
+  });
+
+  it('reuses a leftover room from a failed run instead of creating another', async () => {
+    client.joinedRooms.mockResolvedValue({
+      joined_rooms: ['!old:x', '!other:x'],
+    });
+    client.getStateEvent.mockImplementation(async (roomId: string) =>
+      roomId === '!old:x' ? { name: 'Main' } : { name: 'Something else' },
+    );
+    const moved = await migrateToMatrix({
+      db,
+      client,
+      owner: '@koko:x',
+      log: () => {},
+    });
+    expect(moved.map((m) => [m.roomName, m.to])).toEqual([
+      ['Main', 'mx:!old:x'],
+      ['Linkbase', 'mx:!room1:x'],
+    ]);
+    expect(createRoom.mock.calls).toEqual([['Linkbase', ['@koko:x']]]);
   });
 });

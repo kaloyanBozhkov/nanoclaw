@@ -14,7 +14,8 @@
  *   npx tsx scripts/migrate-to-matrix.ts --owner @koko:koko.internal [--dry-run]
  *
  * Rooms are created before the transaction, so a failure leaves at most an
- * empty room behind; rerunning skips groups that already moved.
+ * empty room behind; rerunning skips groups that already moved and reuses such
+ * leftover rooms (matched by name) instead of creating duplicates.
  */
 import path from 'path';
 
@@ -36,7 +37,7 @@ interface GroupRow {
 
 export interface MigrateOptions {
   db: Database.Database;
-  client: Pick<MatrixClient, 'createRoom'>;
+  client: Pick<MatrixClient, 'createRoom' | 'joinedRooms' | 'getStateEvent'>;
   owner: string;
   dryRun?: boolean;
   log?: (line: string) => void;
@@ -98,6 +99,38 @@ export function rekeyGroup(
   })();
 }
 
+/**
+ * Rooms the bot is in that no group is registered to, by name — left behind
+ * when an earlier run created them and then failed.
+ */
+async function unusedRoomsByName(
+  db: Database.Database,
+  client: MigrateOptions['client'],
+): Promise<Map<string, string>> {
+  const registered = new Set(
+    (
+      db
+        .prepare(`SELECT jid FROM registered_groups WHERE jid LIKE 'mx:%'`)
+        .all() as { jid: string }[]
+    ).map((r) => r.jid.slice(3)),
+  );
+  const byName = new Map<string, string>();
+  const { joined_rooms } = await client.joinedRooms();
+  for (const roomId of joined_rooms) {
+    if (registered.has(roomId)) continue;
+    try {
+      const { name } = await client.getStateEvent<{ name?: string }>(
+        roomId,
+        'm.room.name',
+      );
+      if (name && !byName.has(name)) byName.set(name, roomId);
+    } catch {
+      // No name event — not one of ours.
+    }
+  }
+  return byName;
+}
+
 export async function migrateToMatrix(
   opts: MigrateOptions,
 ): Promise<MigratedGroup[]> {
@@ -109,6 +142,10 @@ export async function migrateToMatrix(
     )
     .all() as GroupRow[];
 
+  const leftovers = opts.dryRun
+    ? new Map<string, string>()
+    : await unusedRoomsByName(opts.db, opts.client);
+
   const moved: MigratedGroup[] = [];
   for (const g of groups) {
     const roomName = g.is_main ? MAIN_ROOM_NAME : g.name;
@@ -116,7 +153,13 @@ export async function migrateToMatrix(
       log(`[dry run] ${g.jid} (${g.folder}) → new room "${roomName}"`);
       continue;
     }
-    const { room_id } = await opts.client.createRoom(roomName, [opts.owner]);
+    let room_id = leftovers.get(roomName);
+    if (room_id) {
+      leftovers.delete(roomName);
+      log(`reusing leftover room ${room_id} for "${roomName}"`);
+    } else {
+      ({ room_id } = await opts.client.createRoom(roomName, [opts.owner]));
+    }
     const to = `mx:${room_id}`;
     rekeyGroup(opts.db, g.jid, to);
     moved.push({ folder: g.folder, from: g.jid, to, roomName });
