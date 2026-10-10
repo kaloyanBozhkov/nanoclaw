@@ -1,4 +1,3 @@
-import { execSync } from 'child_process';
 import fs from 'fs';
 import https from 'https';
 import os from 'os';
@@ -15,6 +14,7 @@ import {
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { transcribeVoice } from '../transcribe.js';
 import { logger } from '../logger.js';
 import {
   formatBytes,
@@ -32,13 +32,6 @@ import {
   RegisteredGroup,
   SendMediaOptions,
 } from '../types.js';
-
-const WHISPER_MODEL_PATH = path.join(
-  process.cwd(),
-  'data',
-  'models',
-  'ggml-base.en.bin',
-);
 
 /**
  * Download a Telegram file to a temporary path.
@@ -65,35 +58,6 @@ async function downloadTelegramFile(
       })
       .on('error', reject);
   });
-}
-
-/**
- * Transcribe an OGG voice file using local whisper-cli.
- * Telegram voice notes are OGG/Opus — convert to 16kHz WAV first.
- */
-function transcribeVoice(oggPath: string): string {
-  const wavPath = oggPath.replace(/\.ogg$/, '.wav');
-  try {
-    // Convert OGG/Opus to 16kHz mono WAV (required by whisper-cli)
-    execSync(
-      `/opt/homebrew/bin/ffmpeg -y -i "${oggPath}" -ar 16000 -ac 1 -c:a pcm_s16le "${wavPath}"`,
-      { timeout: 15000, stdio: 'pipe' },
-    );
-
-    const output = execSync(
-      `/opt/homebrew/bin/whisper-cli -m "${WHISPER_MODEL_PATH}" -f "${wavPath}" --no-timestamps -np`,
-      { encoding: 'utf-8', timeout: 30000 },
-    );
-
-    return output.trim();
-  } finally {
-    try {
-      fs.unlinkSync(oggPath);
-    } catch {}
-    try {
-      fs.unlinkSync(wavPath);
-    } catch {}
-  }
 }
 
 /**

@@ -155,9 +155,9 @@ export const AGENT_MODEL =
   process.env.ANTHROPIC_MODEL || envConfig.ANTHROPIC_MODEL || 'claude-opus-5-5';
 
 // Sender IDs treated as the owner for privileged chat commands (e.g. switching
-// the model). Comma-separated in OWNER_IDS. For Telegram this is the numeric
-// user ID (ctx.from.id) — NOT the @username. Telegram bot messages are always
-// is_from_me:false, so owner MUST be identified by sender ID, not is_from_me.
+// the model). Comma-separated in OWNER_IDS. For Matrix this is the full user
+// ID (@you:server). Inbound messages are always is_from_me:false, so the owner
+// MUST be identified by sender ID, not is_from_me.
 export const OWNER_IDS = new Set(
   (process.env.OWNER_IDS || envConfig.OWNER_IDS || '')
     .split(',')

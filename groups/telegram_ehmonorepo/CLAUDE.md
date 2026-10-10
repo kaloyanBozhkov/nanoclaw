@@ -76,11 +76,10 @@ the owner rather than assuming another group's state.
 
 ## Message formatting
 
-NEVER use markdown. Telegram formatting only:
+Replies are shown in Element X (Matrix), which renders standard Markdown:
+- **double asterisks** for bold, _underscores_ for italic
+- `-` bullets and numbered lists
+- `inline code` and ```fenced code blocks```
+- [links](url) and short ### headings are fine
 
-- `*single asterisks*` for bold — never double asterisks
-- `_underscores_` for italic
-- `•` for bullets
-- ` ```triple backticks``` ` for code
-
-No `##` headings. No `[links](url)`.
+Avoid tables — they don't fit a phone screen.

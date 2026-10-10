@@ -95,13 +95,13 @@ At the start of every new conversation, check if `/workspace/group/session-conte
 
 ## Message Formatting
 
-NEVER use markdown. Only use WhatsApp/Telegram formatting:
-- *single asterisks* for bold (NEVER **double asterisks**)
-- _underscores_ for italic
-- • bullet points
-- ```triple backticks``` for code
+Replies are shown in Element X (Matrix), which renders standard Markdown:
+- **double asterisks** for bold, _underscores_ for italic
+- `-` bullets and numbered lists
+- `inline code` and ```fenced code blocks```
+- [links](url) and short ### headings are fine
 
-No ## headings. No [links](url). No **double stars**.
+Avoid tables — they don't fit a phone screen.
 
 ---
 

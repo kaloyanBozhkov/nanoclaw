@@ -1,8 +1,8 @@
 /**
  * `/help` — every chat command NanoClaw intercepts before the agent sees it.
  *
- * Keep this in step with the onMessage dispatch in index.ts (and the Telegram
- * built-ins in channels/telegram.ts) when adding or renaming a command.
+ * Keep this in step with the onMessage dispatch in index.ts (and the channel
+ * built-ins in channels/matrix.ts) when adding or renaming a command.
  */
 
 export interface HelpEntry {
@@ -24,14 +24,19 @@ export const HELP_SECTIONS: HelpSection[] = [
       { usage: '/stop', description: 'Cancel the running agent' },
       {
         usage: '/new',
-        description: 'Reset the conversation (asks to confirm; Telegram)',
+        description: 'Reset the conversation (asks to confirm)',
       },
       {
         usage: 'nosleep / yessleep',
         description: 'Lift / restore the agent’s runtime cap',
       },
-      { usage: '/ping', description: 'Check the bot is online (Telegram)' },
-      { usage: '/chatid', description: 'Show this chat’s ID (Telegram)' },
+      { usage: '/ping', description: 'Check the bot is online' },
+      { usage: '/chatid', description: 'Show this chat’s ID' },
+      {
+        usage: '/mxroom <name>',
+        description: 'Create a new Matrix room and invite you',
+        ownerOnly: true,
+      },
     ],
   },
   {
@@ -149,7 +154,7 @@ export function formatHelp(): string {
     lines.push('');
   }
   lines.push(
-    '🔒 = owner only. On Telegram, /gitinfo, /gitsafety and /prisma_db_generate work too. Anything else goes to the agent.',
+    '🔒 = owner only. /gitinfo, /gitsafety and /prisma_db_generate work too. Anything else goes to the agent.',
   );
   return lines.join('\n');
 }
