@@ -11,7 +11,7 @@ const WHISPER_MODEL_PATH = path.join(
 
 /**
  * Transcribe a voice note using local whisper-cli.
- * Telegram and Element X both send OGG/Opus — convert to 16kHz WAV first.
+ * Element X sends OGG/Opus — convert to 16kHz WAV first.
  * Deletes the input file and the intermediate WAV either way.
  */
 export function transcribeVoice(audioPath: string): string {
