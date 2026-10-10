@@ -194,6 +194,28 @@ export class GroupQueue {
     };
   }
 
+  /** Every group with a live container — what a restart would interrupt. */
+  listActive(): {
+    groupJid: string;
+    containerName: string;
+    groupFolder: string;
+    idle: boolean;
+    isTask: boolean;
+  }[] {
+    const out = [];
+    for (const [groupJid, state] of this.groups) {
+      if (!state.active || !state.containerName || !state.groupFolder) continue;
+      out.push({
+        groupJid,
+        containerName: state.containerName,
+        groupFolder: state.groupFolder,
+        idle: state.idleWaiting,
+        isTask: state.isTaskContainer,
+      });
+    }
+    return out;
+  }
+
   /**
    * Mark the container as idle-waiting (finished work, waiting for IPC input).
    * If tasks are pending, preempt the idle container immediately.

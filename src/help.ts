@@ -38,6 +38,11 @@ export const HELP_SECTIONS: HelpSection[] = [
           'New project: room, folder ~/Documents/koko/<name> mounted, optional GitHub repo',
         ownerOnly: true,
       },
+      {
+        usage: '/restart-nanoclaw',
+        description: 'Restart NanoClaw (asks first if agents are running)',
+        ownerOnly: true,
+      },
     ],
   },
   {

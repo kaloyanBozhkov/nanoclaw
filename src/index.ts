@@ -101,6 +101,7 @@ import {
   type ResetScope,
 } from './session-reset.js';
 import { addPin, formatPinList, listPins, removePin } from './pinned.js';
+import { takeRestartNotice, writeRestartNotice } from './restart.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -2050,6 +2051,21 @@ async function main(): Promise<void> {
       previewReset(groupFolder, scope),
     registeredGroups: () => registeredGroups,
     registerGroup,
+    listRunningAgents: () =>
+      queue.listActive().map((a) => {
+        const startedAt = parseContainerStartedAt(a.containerName);
+        return {
+          name: registeredGroups[a.groupJid]?.name ?? a.groupFolder,
+          folder: a.groupFolder,
+          idle: a.idle,
+          isTask: a.isTask,
+          uptime: startedAt ? formatUptime(startedAt) : undefined,
+        };
+      }),
+    restartService: (jid: string) => {
+      writeRestartNotice(jid);
+      void shutdown('restart-nanoclaw');
+    },
   };
 
   // Create and connect all registered channels.
@@ -2071,6 +2087,14 @@ async function main(): Promise<void> {
   if (channels.length === 0) {
     logger.fatal('No channels connected');
     process.exit(1);
+  }
+
+  // Tell whoever ran /restart-nanoclaw that we're back.
+  const restartedFrom = takeRestartNotice();
+  if (restartedFrom) {
+    findChannel(channels, restartedFrom)
+      ?.sendMessage(restartedFrom, '✅ NanoClaw is back online.')
+      .catch((err) => logger.warn({ err }, 'Failed to send restart notice'));
   }
 
   // Host-side Prisma regeneration reports back to the chat it ran for.

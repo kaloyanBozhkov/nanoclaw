@@ -118,6 +118,8 @@ function makeOpts(registered = true) {
       ],
     })),
     registerGroup: vi.fn(),
+    listRunningAgents: vi.fn(() => [] as unknown[]),
+    restartService: vi.fn(),
     registeredGroups: vi.fn(() =>
       registered
         ? {
@@ -582,6 +584,67 @@ describe('MatrixChannel', () => {
       expect(client.createRoom).not.toHaveBeenCalled();
       expect(opts.registerGroup).not.toHaveBeenCalled();
       expect(sentBodies(client).at(-1)).toContain('already exists');
+    });
+
+    describe('/restart-nanoclaw', () => {
+      const busy = [
+        {
+          name: 'Linkbase',
+          folder: 'linkbase',
+          idle: false,
+          isTask: false,
+          uptime: '3m',
+        },
+      ];
+
+      it('is owner-only', async () => {
+        await say('/restart-nanoclaw', '@other:test');
+        expect(opts.restartService).not.toHaveBeenCalled();
+        expect(sentBodies(client).at(-1)).toContain('Only the owner');
+      });
+
+      it('restarts straight away when no agent is running', async () => {
+        await say('/restart-nanoclaw');
+        expect(opts.restartService).toHaveBeenCalledWith(JID);
+        expect(sentBodies(client).at(-1)).toContain('Restarting NanoClaw');
+      });
+
+      it('lists running agents and waits for confirmation', async () => {
+        opts.listRunningAgents.mockReturnValue(busy);
+        await say('/restart-nanoclaw');
+        expect(opts.restartService).not.toHaveBeenCalled();
+        expect(sentBodies(client).at(-1)).toContain(
+          '**Linkbase** — busy, up 3m',
+        );
+        const seeded = client.sendEvent.mock.calls
+          .filter((c) => c[1] === 'm.reaction')
+          .map((c) => c[2]['m.relates_to'].key);
+        expect(seeded).toEqual(['✅', '❌']);
+
+        await react('✅');
+        expect(opts.restartService).toHaveBeenCalledWith(JID);
+      });
+
+      it('does nothing on ❌ or no', async () => {
+        opts.listRunningAgents.mockReturnValue(busy);
+        await say('/restart-nanoclaw');
+        await react('❌');
+        expect(opts.restartService).not.toHaveBeenCalled();
+        expect(sentBodies(client).at(-1)).toContain('keeps running');
+
+        await say('/restart-nanoclaw');
+        await say('no');
+        expect(opts.restartService).not.toHaveBeenCalled();
+        expect(opts.onMessage).not.toHaveBeenCalled();
+      });
+
+      it('only the asker can confirm', async () => {
+        opts.listRunningAgents.mockReturnValue(busy);
+        await say('/restart-nanoclaw');
+        await react('✅', '@other:test');
+        await say('yes', '@other:test');
+        expect(opts.restartService).not.toHaveBeenCalled();
+      });
     });
 
     describe('git setup question in the new room', () => {

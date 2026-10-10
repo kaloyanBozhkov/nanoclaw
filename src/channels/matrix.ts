@@ -22,6 +22,7 @@ import {
   projectSlug,
   setUpGitHubRepo,
 } from '../project-setup.js';
+import { formatRunningAgents, RunningAgent } from '../restart.js';
 import {
   formatBytes,
   formatResetFileList,
@@ -58,7 +59,13 @@ const SYNC_TIMEOUT_MS = 30000;
 const SYNC_BACKOFF_MAX_MS = 60000;
 
 /** Commands the channel answers itself — never forwarded to the agent. */
-const CHANNEL_COMMANDS = new Set(['chatid', 'ping', 'new', 'setup-project']);
+const CHANNEL_COMMANDS = new Set([
+  'chatid',
+  'ping',
+  'new',
+  'setup-project',
+  'restart-nanoclaw',
+]);
 
 /**
  * Lazy-load members so a sync only carries the profiles of people who spoke,
@@ -232,6 +239,17 @@ export interface MatrixChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
   /** Register a new chat as a NanoClaw group (used by `/setup-project`). */
   registerGroup?: (jid: string, group: RegisteredGroup) => void;
+  /** Agent containers a restart would interrupt. */
+  listRunningAgents?: () => RunningAgent[];
+  /** Exit cleanly so the service manager restarts NanoClaw. */
+  restartService?: (jid: string) => void;
+}
+
+/** A `/restart-nanoclaw` waiting on confirmation because agents are running. */
+interface PendingRestart {
+  senderId: string;
+  expiresAt: number;
+  promptEventId?: string;
 }
 
 /** A `/setup-project` project waiting for a yes/no on git + GitHub setup. */
@@ -342,6 +360,7 @@ export class MatrixChannel implements Channel {
   /** Unanswered `/new` confirmations, keyed by chat JID. */
   private pendingResets = new Map<string, PendingReset>();
   private pendingGitSetups = new Map<string, PendingGitSetup>();
+  private pendingRestarts = new Map<string, PendingRestart>();
 
   constructor(
     private client: MatrixClient,
@@ -722,6 +741,17 @@ export class MatrixChannel implements Channel {
     if (rel?.rel_type !== 'm.annotation' || typeof rel.key !== 'string') return;
     const chatJid = `${MATRIX_JID_PREFIX}${roomId}`;
 
+    const restart = this.pendingRestarts.get(chatJid);
+    if (
+      restart &&
+      restart.senderId === ev.sender &&
+      restart.promptEventId === rel.event_id
+    ) {
+      const yes = lookupReaction(YES_NO_REACTIONS, rel.key);
+      if (yes !== undefined) await this.answerRestart(chatJid, restart, yes);
+      return;
+    }
+
     const gitSetup = this.pendingGitSetups.get(chatJid);
     if (
       gitSetup &&
@@ -757,6 +787,15 @@ export class MatrixChannel implements Channel {
     sender: string,
     body: string,
   ): Promise<boolean> {
+    const restart = this.pendingRestarts.get(chatJid);
+    if (restart && restart.senderId === sender) {
+      const yes = YES_NO[body.toLowerCase().replace(/[.!]+$/, '')];
+      if (yes !== undefined) {
+        await this.answerRestart(chatJid, restart, yes);
+        return true;
+      }
+    }
+
     const gitSetup = this.pendingGitSetups.get(chatJid);
     if (gitSetup && gitSetup.senderId === sender) {
       const yes = YES_NO[body.toLowerCase().replace(/[.!]+$/, '')];
@@ -798,6 +837,9 @@ export class MatrixChannel implements Channel {
         break;
       case 'setup-project':
         await this.createRoomFor(chatJid, sender, rest.join(' ').trim());
+        break;
+      case 'restart-nanoclaw':
+        await this.startRestart(chatJid, sender);
         break;
     }
     return true;
@@ -968,6 +1010,71 @@ export class MatrixChannel implements Channel {
       `👋 **${name}** is ready, working in \`${mount.hostPath}\`.\n\nSet up git and a new private GitHub repo **${slug}**? Tap ${YES_REACTION} or ${NO_REACTION}, or reply **yes** or **no**.`,
       [YES_REACTION, NO_REACTION],
     );
+  }
+
+  /**
+   * `/restart-nanoclaw` — restart right away when no agent is running;
+   * otherwise list them and wait for a ✅/❌ (a restart stops them).
+   */
+  private async startRestart(chatJid: string, sender: string): Promise<void> {
+    if (!isOwnerSender(sender, false)) {
+      await this.sendMessage(
+        chatJid,
+        '⚠️ Only the owner can restart NanoClaw.',
+      );
+      return;
+    }
+    if (!this.opts.restartService) {
+      await this.sendMessage(chatJid, '⚠️ Restart is unavailable.');
+      return;
+    }
+    const running = this.opts.listRunningAgents?.() ?? [];
+    if (running.length === 0) {
+      await this.doRestart(chatJid);
+      return;
+    }
+    const pending: PendingRestart = {
+      senderId: sender,
+      expiresAt: Date.now() + RESET_CONFIRM_TTL_MS,
+    };
+    this.pendingRestarts.set(chatJid, pending);
+    const n = running.length;
+    pending.promptEventId = await this.sendPrompt(
+      chatJid,
+      `⚠️ ${n} agent${n === 1 ? ' is' : 's are'} running and will be stopped by a restart:\n` +
+        `${formatRunningAgents(running)}\n\n` +
+        `Restart anyway? Tap ${YES_REACTION} or ${NO_REACTION}, or reply **yes** or **no**.`,
+      [YES_REACTION, NO_REACTION],
+    );
+  }
+
+  private async answerRestart(
+    chatJid: string,
+    pending: PendingRestart,
+    yes: boolean,
+  ): Promise<void> {
+    this.pendingRestarts.delete(chatJid);
+    if (Date.now() > pending.expiresAt) {
+      await this.sendMessage(
+        chatJid,
+        'That restart prompt expired — nothing was restarted. Send /restart-nanoclaw again.',
+      );
+      return;
+    }
+    if (!yes) {
+      await this.sendMessage(chatJid, 'Cancelled — NanoClaw keeps running.');
+      return;
+    }
+    await this.doRestart(chatJid);
+  }
+
+  private async doRestart(chatJid: string): Promise<void> {
+    await this.sendMessage(
+      chatJid,
+      "♻️ Restarting NanoClaw… I'll post here when it's back.",
+    );
+    logger.info({ chatJid }, 'Restart requested via /restart-nanoclaw');
+    this.opts.restartService!(chatJid);
   }
 
   private async answerGitSetup(

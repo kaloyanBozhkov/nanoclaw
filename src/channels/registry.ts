@@ -1,3 +1,4 @@
+import type { RunningAgent } from '../restart.js';
 import { ResetPreview, ResetScope } from '../session-reset.js';
 import {
   Channel,
@@ -15,6 +16,10 @@ export interface ChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
   /** Register a new chat as a group (channels that can create chats). */
   registerGroup?: (jid: string, group: RegisteredGroup) => void;
+  /** Agent containers a restart would interrupt. */
+  listRunningAgents?: () => RunningAgent[];
+  /** Exit cleanly so the service manager restarts us; `jid` hears when we're back. */
+  restartService?: (jid: string) => void;
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;
