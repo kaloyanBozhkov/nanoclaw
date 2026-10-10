@@ -58,7 +58,7 @@ const SYNC_TIMEOUT_MS = 30000;
 const SYNC_BACKOFF_MAX_MS = 60000;
 
 /** Commands the channel answers itself — never forwarded to the agent. */
-const CHANNEL_COMMANDS = new Set(['chatid', 'ping', 'new', 'mxroom']);
+const CHANNEL_COMMANDS = new Set(['chatid', 'ping', 'new', 'setup-project']);
 
 /**
  * Lazy-load members so a sync only carries the profiles of people who spoke,
@@ -230,16 +230,18 @@ export interface MatrixChannelOpts {
   ) => string | undefined | void;
   onPreviewReset: (groupFolder: string, scope?: ResetScope) => ResetPreview;
   registeredGroups: () => Record<string, RegisteredGroup>;
-  /** Register a new chat as a NanoClaw group (used by `/mxroom`). */
+  /** Register a new chat as a NanoClaw group (used by `/setup-project`). */
   registerGroup?: (jid: string, group: RegisteredGroup) => void;
 }
 
-/** A `/mxroom` project waiting for a yes/no on git + GitHub setup. */
+/** A `/setup-project` project waiting for a yes/no on git + GitHub setup. */
 interface PendingGitSetup {
   dir: string;
   slug: string;
   title: string;
   senderId: string;
+  /** The question's event — reactions on it answer it. */
+  promptEventId?: string;
 }
 
 const YES_NO: Record<string, boolean> = {
@@ -255,6 +257,53 @@ interface PendingReset {
   senderId: string;
   expiresAt: number;
   hasCache: boolean;
+  /** The prompt's event — reactions on it answer it. */
+  promptEventId?: string;
+}
+
+/*
+ * Matrix has no inline buttons, so prompts double as reaction pickers: the bot
+ * seeds one reaction per choice and a tap on it answers, same as typing.
+ */
+const YES_REACTION = '✅';
+const KEEP_REACTION = '♻️';
+const NO_REACTION = '❌';
+const LIST_REACTION = '📄';
+
+const RESET_REACTIONS: Record<string, 'all' | 'session' | 'no' | 'list'> = {
+  [YES_REACTION]: 'all',
+  [KEEP_REACTION]: 'session',
+  [NO_REACTION]: 'no',
+  [LIST_REACTION]: 'list',
+};
+
+const YES_NO_REACTIONS: Record<string, boolean> = {
+  [YES_REACTION]: true,
+  [NO_REACTION]: false,
+};
+
+/** Clients differ on the emoji variation selector; compare without it. */
+function reactionKey(key: string): string {
+  return key.replace(/\uFE0F/g, '');
+}
+
+function lookupReaction<T>(
+  table: Record<string, T>,
+  key: string,
+): T | undefined {
+  const k = reactionKey(key);
+  for (const [emoji, value] of Object.entries(table)) {
+    if (reactionKey(emoji) === k) return value;
+  }
+  return undefined;
+}
+
+function resetReactionKeys(hasCache: boolean, withList: boolean): string[] {
+  const keys = hasCache
+    ? [YES_REACTION, KEEP_REACTION, NO_REACTION]
+    : [YES_REACTION, NO_REACTION];
+  if (withList) keys.push(LIST_REACTION);
+  return keys;
 }
 
 /** The typed answers to a `/new` prompt, standing in for Telegram's buttons. */
@@ -271,11 +320,14 @@ const RESET_ANSWERS: Record<string, 'all' | 'session' | 'no' | 'list'> = {
 
 function resetChoices(hasCache: boolean, withList: boolean): string {
   const opts = hasCache
-    ? ['*yes* — clear everything', '*keep* — clear but keep caches']
-    : ['*yes* — clear it'];
-  opts.push('*cancel*');
-  if (withList) opts.push('*list* — show the files');
-  return `Reply ${opts.join(', ')}.`;
+    ? [
+        `${YES_REACTION} *yes* — clear everything`,
+        `${KEEP_REACTION} *keep* — clear but keep caches`,
+      ]
+    : [`${YES_REACTION} *yes* — clear it`];
+  opts.push(`${NO_REACTION} *cancel*`);
+  if (withList) opts.push(`${LIST_REACTION} *list* — show the files`);
+  return `Tap a reaction or reply:\n${opts.join('\n')}`;
 }
 
 export class MatrixChannel implements Channel {
@@ -394,8 +446,20 @@ export class MatrixChannel implements Channel {
           this.applyState(roomId, ev);
           continue;
         }
-        if (!deliver || ev.type !== 'm.room.message') continue;
+        if (!deliver) continue;
         if (ev.sender === this.userId) continue;
+        if (ev.type === 'm.reaction') {
+          try {
+            await this.handleReaction(roomId, ev);
+          } catch (err) {
+            logger.error(
+              { err, roomId, eventId: ev.event_id },
+              'Matrix: failed to handle reaction',
+            );
+          }
+          continue;
+        }
+        if (ev.type !== 'm.room.message') continue;
         try {
           await this.handleMessage(roomId, ev);
         } catch (err) {
@@ -652,6 +716,37 @@ export class MatrixChannel implements Channel {
     return dest;
   }
 
+  /** A tap on one of a pending prompt's seeded reactions answers it. */
+  private async handleReaction(roomId: string, ev: MatrixEvent): Promise<void> {
+    const rel = ev.content['m.relates_to'];
+    if (rel?.rel_type !== 'm.annotation' || typeof rel.key !== 'string') return;
+    const chatJid = `${MATRIX_JID_PREFIX}${roomId}`;
+
+    const gitSetup = this.pendingGitSetups.get(chatJid);
+    if (
+      gitSetup &&
+      gitSetup.senderId === ev.sender &&
+      gitSetup.promptEventId === rel.event_id
+    ) {
+      const yes = lookupReaction(YES_NO_REACTIONS, rel.key);
+      if (yes !== undefined) {
+        this.pendingGitSetups.delete(chatJid);
+        await this.answerGitSetup(chatJid, gitSetup, yes);
+      }
+      return;
+    }
+
+    const pending = this.pendingResets.get(chatJid);
+    if (
+      pending &&
+      pending.senderId === ev.sender &&
+      pending.promptEventId === rel.event_id
+    ) {
+      const answer = lookupReaction(RESET_REACTIONS, rel.key);
+      if (answer) await this.answerReset(chatJid, pending, answer);
+    }
+  }
+
   /**
    * Channel-level commands and `/new` answers. Returns true when the text was
    * consumed here and must not reach the agent.
@@ -701,7 +796,7 @@ export class MatrixChannel implements Channel {
       case 'new':
         await this.startReset(chatJid, sender);
         break;
-      case 'mxroom':
+      case 'setup-project':
         await this.createRoomFor(chatJid, sender, rest.join(' ').trim());
         break;
     }
@@ -720,15 +815,17 @@ export class MatrixChannel implements Channel {
       return;
     }
     const hasCache = preview.targets.some((t) => t.kind === 'cache');
-    this.pendingResets.set(chatJid, {
+    const pending: PendingReset = {
       groupFolder: group.folder,
       senderId: sender,
       expiresAt: Date.now() + RESET_CONFIRM_TTL_MS,
       hasCache,
-    });
-    await this.sendMessage(
+    };
+    this.pendingResets.set(chatJid, pending);
+    pending.promptEventId = await this.sendPrompt(
       chatJid,
       `${formatResetPreview(preview)}\n\n${resetChoices(hasCache, true)}`,
+      resetReactionKeys(hasCache, true),
     );
   }
 
@@ -748,9 +845,10 @@ export class MatrixChannel implements Channel {
 
     if (answer === 'list') {
       const listed = this.opts.onPreviewReset(pending.groupFolder);
-      await this.sendMessage(
+      pending.promptEventId = await this.sendPrompt(
         chatJid,
         `${formatResetFileList(listed)}\n\n${resetChoices(pending.hasCache, false)}`,
+        resetReactionKeys(pending.hasCache, false),
       );
       return;
     }
@@ -788,7 +886,7 @@ export class MatrixChannel implements Channel {
   }
 
   /**
-   * `/mxroom <name>` — a new project: an unencrypted room with the asker
+   * `/setup-project <name>` — a new project: an unencrypted room with the asker
    * invited, registered as a NanoClaw group, with ~/Documents/koko/<slug>
    * mounted read-write. The new room then asks whether to set up git + GitHub.
    */
@@ -802,7 +900,7 @@ export class MatrixChannel implements Channel {
       return;
     }
     if (!name) {
-      await this.sendMessage(chatJid, 'Usage: /mxroom <name>');
+      await this.sendMessage(chatJid, 'Usage: /setup-project <name>');
       return;
     }
     const slug = projectSlug(name);
@@ -858,15 +956,17 @@ export class MatrixChannel implements Channel {
       );
       return;
     }
-    this.pendingGitSetups.set(jid, {
+    const setup: PendingGitSetup = {
       dir,
       slug,
       title: name,
       senderId: sender,
-    });
-    await this.sendMessage(
+    };
+    this.pendingGitSetups.set(jid, setup);
+    setup.promptEventId = await this.sendPrompt(
       jid,
-      `👋 **${name}** is ready, working in \`${mount.hostPath}\`.\n\nSet up git and a new private GitHub repo **${slug}**? Reply **yes** or **no**.`,
+      `👋 **${name}** is ready, working in \`${mount.hostPath}\`.\n\nSet up git and a new private GitHub repo **${slug}**? Tap ${YES_REACTION} or ${NO_REACTION}, or reply **yes** or **no**.`,
+      [YES_REACTION, NO_REACTION],
     );
   }
 
@@ -894,20 +994,54 @@ export class MatrixChannel implements Channel {
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
+    await this.sendText(jid, text);
+  }
+
+  /** Send a prompt and seed one reaction per choice; returns its event ID. */
+  private async sendPrompt(
+    jid: string,
+    text: string,
+    reactions: string[],
+  ): Promise<string | undefined> {
+    const eventId = await this.sendText(jid, text);
+    if (!eventId) return undefined;
+    const roomId = jid.slice(MATRIX_JID_PREFIX.length);
+    for (const key of reactions) {
+      try {
+        await this.client.sendEvent(roomId, 'm.reaction', {
+          'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key },
+        });
+      } catch (err) {
+        logger.warn(
+          { jid, key, err: err instanceof Error ? err.message : String(err) },
+          'Matrix: failed to seed prompt reaction',
+        );
+      }
+    }
+    return eventId;
+  }
+
+  /** Send text (split if long); returns the last chunk's event ID. */
+  private async sendText(
+    jid: string,
+    text: string,
+  ): Promise<string | undefined> {
     if (!this.userId) {
       logger.warn('Matrix bot not connected');
-      return;
+      return undefined;
     }
     const roomId = jid.slice(MATRIX_JID_PREFIX.length);
+    let lastEventId: string | undefined;
     try {
       for (let i = 0; i < text.length; i += MAX_MESSAGE_CHARS) {
         const chunk = text.slice(i, i + MAX_MESSAGE_CHARS);
-        await this.client.sendEvent(roomId, 'm.room.message', {
+        const sent = await this.client.sendEvent(roomId, 'm.room.message', {
           msgtype: 'm.text',
           body: chunk,
           format: 'org.matrix.custom.html',
           formatted_body: renderMarkdown(chunk),
         });
+        lastEventId = sent.event_id;
       }
       logger.info({ jid, length: text.length }, 'Matrix message sent');
     } catch (err) {
@@ -916,6 +1050,7 @@ export class MatrixChannel implements Channel {
         'Failed to send Matrix message',
       );
     }
+    return lastEventId;
   }
 
   /**

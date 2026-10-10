@@ -33,7 +33,7 @@ export const HELP_SECTIONS: HelpSection[] = [
       { usage: '/ping', description: 'Check the bot is online' },
       { usage: '/chatid', description: 'Show this chat’s ID' },
       {
-        usage: '/mxroom <name>',
+        usage: '/setup-project <name>',
         description:
           'New project: room, folder ~/Documents/koko/<name> mounted, optional GitHub repo',
         ownerOnly: true,

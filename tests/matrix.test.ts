@@ -156,7 +156,9 @@ function syncOf(events: MatrixEvent[]): SyncResponse {
 }
 
 function sentBodies(client: ReturnType<typeof fakeClient>): string[] {
-  return client.sendEvent.mock.calls.map((c) => c[2].body as string);
+  return client.sendEvent.mock.calls
+    .filter((c) => c[1] === 'm.room.message')
+    .map((c) => c[2].body as string);
 }
 
 describe('helpers', () => {
@@ -479,6 +481,50 @@ describe('MatrixChannel', () => {
       expect(opts.onMessage).not.toHaveBeenCalled();
     });
 
+    const react = (key: string, sender = '@owner:test', onEvent = '$sent') =>
+      ch.processSync(
+        syncOf([
+          {
+            type: 'm.reaction',
+            event_id: `$r${++n}`,
+            sender,
+            origin_server_ts: 1,
+            content: {
+              'm.relates_to': {
+                rel_type: 'm.annotation',
+                event_id: onEvent,
+                key,
+              },
+            },
+          },
+        ]),
+        { deliver: true },
+      );
+
+    it('/new seeds a reaction per choice on its prompt', async () => {
+      await say('/new');
+      const seeded = client.sendEvent.mock.calls
+        .filter((c) => c[1] === 'm.reaction')
+        .map((c) => c[2]['m.relates_to']);
+      expect(seeded.map((r) => r.key)).toEqual(['✅', '♻️', '❌', '📄']);
+      expect(seeded.every((r) => r.event_id === '$sent')).toBe(true);
+    });
+
+    it('/new is answered by tapping a reaction', async () => {
+      await say('/new');
+      await react('♻'); // no variation selector, as some clients send it
+      expect(opts.onResetSession).toHaveBeenCalledWith('project', 'session');
+    });
+
+    it('ignores reactions from others or on other messages', async () => {
+      await say('/new');
+      await react('✅', '@other:test');
+      await react('✅', '@owner:test', '$somethingElse');
+      expect(opts.onResetSession).not.toHaveBeenCalled();
+      await react('❌');
+      expect(sentBodies(client).at(-1)).toContain('nothing was deleted');
+    });
+
     it('/new keep clears the session but not caches', async () => {
       await say('/new');
       await say('keep');
@@ -500,18 +546,18 @@ describe('MatrixChannel', () => {
       expect(opts.onMessage).toHaveBeenCalled(); // just a normal message
     });
 
-    it('/mxroom is owner-only and invites the asker', async () => {
-      await say('/mxroom Side project', '@other:test');
+    it('/setup-project is owner-only and invites the asker', async () => {
+      await say('/setup-project Side project', '@other:test');
       expect(client.createRoom).not.toHaveBeenCalled();
-      await say('/mxroom Side project');
+      await say('/setup-project Side project');
       expect(client.createRoom).toHaveBeenCalledWith('Side project', [
         '@owner:test',
       ]);
       expect(sentBodies(client).join('\n')).toContain('mx:!new:test');
     });
 
-    it('/mxroom registers the room as a project with its folder mounted', async () => {
-      await say('/mxroom Side project');
+    it('/setup-project registers the room as a project with its folder mounted', async () => {
+      await say('/setup-project Side project');
       expect(opts.registerGroup).toHaveBeenCalledWith(
         'mx:!new:test',
         expect.objectContaining({
@@ -531,8 +577,8 @@ describe('MatrixChannel', () => {
       );
     });
 
-    it('/mxroom refuses a folder that is already registered', async () => {
-      await say('/mxroom Project');
+    it('/setup-project refuses a folder that is already registered', async () => {
+      await say('/setup-project Project');
       expect(client.createRoom).not.toHaveBeenCalled();
       expect(opts.registerGroup).not.toHaveBeenCalled();
       expect(sentBodies(client).at(-1)).toContain('already exists');
@@ -558,7 +604,7 @@ describe('MatrixChannel', () => {
         );
       const roomBodies = () =>
         client.sendEvent.mock.calls
-          .filter((c) => c[0] === NEW_ROOM)
+          .filter((c) => c[0] === NEW_ROOM && c[1] === 'm.room.message')
           .map((c) => c[2].body as string);
 
       beforeEach(() => {
@@ -567,8 +613,8 @@ describe('MatrixChannel', () => {
       });
 
       it('asks in the new room and sets up GitHub on yes', async () => {
-        await say('/mxroom Side project');
-        expect(roomBodies().at(-1)).toContain('Reply **yes** or **no**');
+        await say('/setup-project Side project');
+        expect(roomBodies().at(-1)).toContain('reply **yes** or **no**');
 
         await answer('maybe', '@other:test'); // not the asker: ignored
         await answer('yes');
@@ -587,7 +633,7 @@ describe('MatrixChannel', () => {
       });
 
       it('does nothing on no, and only asks once', async () => {
-        await say('/mxroom Side project');
+        await say('/setup-project Side project');
         await answer('no');
         await answer('yes');
         expect(project.setUp).not.toHaveBeenCalled();
@@ -596,15 +642,54 @@ describe('MatrixChannel', () => {
 
       it('skips the question when the folder already has a remote', async () => {
         project.remote = 'git@github.com:me/side-project.git';
-        await say('/mxroom Side project');
+        await say('/setup-project Side project');
         expect(roomBodies().at(-1)).toContain('already a git repo');
         await answer('yes');
         expect(project.setUp).not.toHaveBeenCalled();
       });
 
+      it('seeds ✅/❌ on the question and a ✅ tap answers yes', async () => {
+        await say('/setup-project Side project');
+        const seeded = client.sendEvent.mock.calls
+          .filter((c) => c[0] === NEW_ROOM && c[1] === 'm.reaction')
+          .map((c) => c[2]['m.relates_to'].key);
+        expect(seeded).toEqual(['✅', '❌']);
+
+        await ch.processSync(
+          {
+            next_batch: 'sZ',
+            rooms: {
+              join: {
+                [NEW_ROOM]: {
+                  timeline: {
+                    events: [
+                      {
+                        type: 'm.reaction',
+                        event_id: '$r1',
+                        sender: '@owner:test',
+                        origin_server_ts: 1,
+                        content: {
+                          'm.relates_to': {
+                            rel_type: 'm.annotation',
+                            event_id: '$sent',
+                            key: '✅',
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+          { deliver: true },
+        );
+        expect(project.setUp).toHaveBeenCalledTimes(1);
+      });
+
       it('reports a failed setup', async () => {
         project.setUp.mockRejectedValueOnce(new Error('name already exists'));
-        await say('/mxroom Side project');
+        await say('/setup-project Side project');
         await answer('yes');
         expect(roomBodies().at(-1)).toContain('name already exists');
       });

@@ -1,5 +1,5 @@
 /**
- * Host-side setup for a project created with `/mxroom`: its working folder
+ * Host-side setup for a project created with `/setup-project`: its working folder
  * under ~/Documents/koko (mounted into the agent container) and, on request,
  * a git repo pushed to a new private GitHub repo via the `gh` CLI.
  */
