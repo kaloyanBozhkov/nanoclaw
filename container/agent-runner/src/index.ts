@@ -32,6 +32,9 @@ import {
 } from './git-safety.js';
 import { readRoleFiles, toSubagentDefinitions } from './agent-defs.js';
 
+/** Anthropic's per-image limit is 5MB of base64. */
+const MAX_IMAGE_BASE64 = 5 * 1024 * 1024;
+
 // Transient failures worth retrying: rate limits, overloads, and network
 // blips. Permanent failures (refusal, auth, dead session) are not matched —
 // retrying them just wastes attempts before the same error surfaces.
@@ -161,7 +164,8 @@ class MessageStream {
   }
 
   pushWithImages(text: string, imagePaths: string[]): void {
-    const content: ContentBlock[] = [{ type: 'text', text }];
+    const textBlock = { type: 'text' as const, text };
+    const content: ContentBlock[] = [textBlock];
     for (const imgPath of imagePaths) {
       try {
         if (!fs.existsSync(imgPath)) {
@@ -169,6 +173,12 @@ class MessageStream {
           continue;
         }
         const data = fs.readFileSync(imgPath).toString('base64');
+        // The API rejects the whole message over one oversized image.
+        if (data.length > MAX_IMAGE_BASE64) {
+          log(`Image too large for the API, skipped: ${imgPath}`);
+          textBlock.text += `\n[Image ${path.basename(imgPath)} was too large to view — it is at ${imgPath}]`;
+          continue;
+        }
         const ext = path.extname(imgPath).toLowerCase();
         const mediaType =
           ext === '.png'

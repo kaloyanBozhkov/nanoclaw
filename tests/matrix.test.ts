@@ -54,6 +54,17 @@ vi.mock('../src/project-setup.js', async () => {
     setUpGitHubRepo: (...args: unknown[]) => project.setUp(...args),
   };
 });
+const vision = vi.hoisted(() => ({
+  result: 'resized' as 'resized' | 'same' | 'none',
+}));
+vi.mock('../src/image-prep.js', () => ({
+  prepareForVision: (src: string) =>
+    vision.result === 'resized'
+      ? src.replace(/\.[^.]+$/, '.vision.jpg')
+      : vision.result === 'same'
+        ? src
+        : null,
+}));
 vi.mock('../src/transcribe.js', () => ({
   transcribeVoice: vi.fn(() => 'hello there'),
 }));
@@ -399,9 +410,47 @@ describe('MatrixChannel', () => {
         { deliver: true },
       );
       const delivered = opts.onMessage.mock.calls[0][1];
-      expect(delivered.content).toBe('[Photo] look');
-      expect(delivered.images[0]).toMatch(/project\/images\/\d+-pic\.png$/);
-      expect(fs.readFileSync(delivered.images[0], 'utf-8')).toBe('bytes');
+      expect(delivered.content).toMatch(
+        /^\[Photo \(full resolution: \/workspace\/group\/images\/\d+-pic\.png\)\] look$/,
+      );
+      expect(delivered.images[0]).toMatch(
+        /project\/images\/\d+-pic\.vision\.jpg$/,
+      );
+      const saved = fs.readdirSync(path.join(tmpRoot.dir, 'project', 'images'));
+      expect(saved).toHaveLength(1);
+      expect(
+        fs.readFileSync(
+          path.join(tmpRoot.dir, 'project', 'images', saved[0]),
+          'utf-8',
+        ),
+      ).toBe('bytes');
+    });
+
+    it('passes a small photo through and flags one it cannot show', async () => {
+      const send = (body: string) =>
+        ch.processSync(
+          syncOf([
+            msg({
+              msgtype: 'm.image',
+              body,
+              filename: 'pic.png',
+              url: 'mxc://test/img',
+              info: { mimetype: 'image/png' },
+            }),
+          ]),
+          { deliver: true },
+        );
+      vision.result = 'same';
+      await send('small');
+      expect(opts.onMessage.mock.calls[0][1].content).toBe('[Photo] small');
+      expect(opts.onMessage.mock.calls[0][1].images[0]).toMatch(/pic\.png$/);
+
+      vision.result = 'none';
+      await send('heic');
+      const second = opts.onMessage.mock.calls[1][1];
+      expect(second.content).toContain("couldn't be shown");
+      expect(second.images).toBeUndefined();
+      vision.result = 'resized';
     });
 
     it('transcribes voice notes', async () => {

@@ -14,6 +14,7 @@ import {
 } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { isValidGroupFolder } from '../group-folder.js';
+import { prepareForVision } from '../image-prep.js';
 import { logger } from '../logger.js';
 import {
   ensureProjectDir,
@@ -605,14 +606,22 @@ export class MatrixChannel implements Channel {
         break;
       case 'm.image': {
         const caption = captionOf(content);
+        let note = '';
         try {
           const dest = await this.saveAttachment(group, 'images', content);
-          images = [dest];
-          logger.info({ chatJid, dest }, 'Photo downloaded');
+          const original = `/workspace/group/images/${path.basename(dest)}`;
+          const vision = prepareForVision(dest);
+          if (vision) {
+            images = [vision];
+            if (vision !== dest) note = ` (full resolution: ${original})`;
+          } else {
+            note = ` (couldn't be shown — saved to ${original})`;
+          }
+          logger.info({ chatJid, dest, vision }, 'Photo downloaded');
         } catch (err) {
           logger.error({ chatJid, err }, 'Failed to download photo');
         }
-        text = `[Photo]${caption ? ` ${caption}` : ''}`;
+        text = `[Photo${note}]${caption ? ` ${caption}` : ''}`;
         break;
       }
       case 'm.audio':
