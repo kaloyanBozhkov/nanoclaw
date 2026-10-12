@@ -48,6 +48,11 @@ export const HELP_SECTIONS: HelpSection[] = [
   {
     title: '🧠 Model, account & tools',
     entries: [
+      {
+        usage: '/usage',
+        description:
+          'Subscription usage (5-hour and weekly) for this chat’s org',
+      },
       { usage: '/models', description: 'List selectable models' },
       {
         usage: '/model [n|name]',

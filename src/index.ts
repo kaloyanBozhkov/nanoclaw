@@ -102,6 +102,7 @@ import {
 } from './session-reset.js';
 import { addPin, formatPinList, listPins, removePin } from './pinned.js';
 import { takeRestartNotice, writeRestartNotice } from './restart.js';
+import { fetchOrgUsage, formatUsage } from './usage.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -989,6 +990,34 @@ async function main(): Promise<void> {
     );
   }
 
+  async function handleUsage(chatJid: string): Promise<void> {
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+    const org = resolveGroupOrg(
+      registeredGroups[chatJid]?.containerConfig?.org,
+    );
+    if (!org) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ This chat is set to an org that no longer exists in .env.',
+      );
+      return;
+    }
+    try {
+      const usage = await fetchOrgUsage(org);
+      await channel.sendMessage(
+        chatJid,
+        formatUsage(org.name, usage, new Date(), TIMEZONE),
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await channel.sendMessage(
+        chatJid,
+        `⚠️ Couldn't get usage for ${org.name}: ${msg}`,
+      );
+    }
+  }
+
   // "nosleep" / "yessleep" — configure this group's hard container runtime cap.
   //   nosleep  → no cap (only the idle timeout can reap the container)
   //   yessleep → restore the default cap (CONTAINER_TIMEOUT)
@@ -1804,6 +1833,14 @@ async function main(): Promise<void> {
       if (trimmed === '/info') {
         handleInfo(chatJid).catch((err) =>
           logger.error({ err, chatJid }, 'Info command error'),
+        );
+        return;
+      }
+
+      // /usage — subscription limits of the org this chat runs as.
+      if (trimmed === '/usage') {
+        handleUsage(chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Usage command error'),
         );
         return;
       }
