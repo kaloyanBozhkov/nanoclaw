@@ -19,6 +19,7 @@ import {
   startRun,
   stopRun,
   urlsIn,
+  RUN_LOG_MAX_BYTES,
 } from '../src/host-run.js';
 
 let root: string;
@@ -138,6 +139,32 @@ describe('running', () => {
     stopRun(started, 1000);
     const r = await exited;
     expect(r.signal).toBe('SIGTERM');
+  });
+});
+
+describe('run log cap', () => {
+  it('stops growing the file past the cap but keeps the tail live', async () => {
+    const r = await new Promise<HostRun>((resolve) => {
+      startRun({
+        chatJid: 'mx:!r:x',
+        script: 'spam',
+        label: 'linkbase',
+        cwd: root,
+        logFile: path.join(root, 'logs', 'spam.log'),
+        command: [
+          process.execPath,
+          '-e',
+          "process.stdout.write(('x'.repeat(1023) + '\\n').repeat(21 * 1024)); console.log('last line')",
+        ],
+        onExit: resolve,
+      });
+    });
+    const size = fs.statSync(r.logFile).size;
+    expect(size).toBeLessThan(RUN_LOG_MAX_BYTES + 128 * 1024);
+    expect(fs.readFileSync(r.logFile, 'utf-8')).toContain(
+      '[log capped at 20 MB',
+    );
+    expect(r.tail.at(-1)).toBe('last line');
   });
 });
 

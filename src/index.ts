@@ -11,6 +11,7 @@ import {
   DATA_DIR,
   DEFAULT_ORG_NAME,
   EPHEMERAL_GROUP_DIRS,
+  GROUPS_DIR,
   IDLE_TIMEOUT,
   isOwnerSender,
   listOrgs,
@@ -69,7 +70,7 @@ import {
   approxTokens,
 } from './consumables.js';
 import { logDesignAccessStatus } from './design-probe.js';
-import { startLogRotation } from './log-rotate.js';
+import { LOG_CHECK_INTERVAL_MS, startLogRotation } from './log-rotate.js';
 import { getGodModeStatus, setGodMode } from './godmode.js';
 import { getSimulatorStatus, setSimulator } from './simulator.js';
 import { getGitSafetyStatus, setGitSafety } from './git-safety.js';
@@ -103,7 +104,8 @@ import {
 import { addPin, formatPinList, listPins, removePin } from './pinned.js';
 import { takeRestartNotice, writeRestartNotice } from './restart.js';
 import { fetchOrgUsage, formatUsage } from './usage.js';
-import { stopAllRuns } from './host-run.js';
+import { activeRuns, stopAllRuns } from './host-run.js';
+import { sweepGroupFiles } from './group-cleanup.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -906,6 +908,14 @@ async function main(): Promise<void> {
   // Keep the launchd service log bounded — nothing else does, and an
   // unbounded log on a full disk is how this service last went down.
   startLogRotation();
+  // Old per-group logs and API image copies — same hourly cadence.
+  const sweep = () =>
+    sweepGroupFiles(
+      GROUPS_DIR,
+      activeRuns().map((r) => r.logFile),
+    );
+  sweep();
+  setInterval(sweep, LOG_CHECK_INTERVAL_MS).unref();
 
   // Ask once whether this identity can actually reach Claude Design. A missing
   // scope surfaces in containers only as an absent mcp__design__*, which reads

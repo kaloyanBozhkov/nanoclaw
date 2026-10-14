@@ -31,6 +31,8 @@ const SKIP_DIRS = new Set([
 ]);
 const MAX_DEPTH = 4;
 const TAIL_LINES = 40;
+/** A dev server can run for days; past this the file stops growing. */
+export const RUN_LOG_MAX_BYTES = 20 * 1024 * 1024;
 
 /** Script names are passed as arguments, but keep them to sane characters. */
 const SCRIPT_NAME = /^[A-Za-z0-9][\w:.@/+-]*$/;
@@ -215,8 +217,17 @@ export function startRun(opts: StartRunOptions): HostRun {
   runs.set(run.id, run);
 
   let partial = '';
+  let logged = 0;
   const onData = (chunk: Buffer) => {
-    log.write(chunk);
+    if (logged < RUN_LOG_MAX_BYTES) {
+      logged += chunk.length;
+      log.write(chunk);
+      if (logged >= RUN_LOG_MAX_BYTES) {
+        log.write(
+          `\n[log capped at ${RUN_LOG_MAX_BYTES / 1048576} MB — /inspect still shows the latest lines]\n`,
+        );
+      }
+    }
     const text = partial + chunk.toString('utf-8');
     const lines = text.split(/\r?\n/);
     partial = lines.pop() ?? '';
