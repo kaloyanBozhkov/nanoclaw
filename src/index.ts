@@ -103,6 +103,7 @@ import {
 import { addPin, formatPinList, listPins, removePin } from './pinned.js';
 import { takeRestartNotice, writeRestartNotice } from './restart.js';
 import { fetchOrgUsage, formatUsage } from './usage.js';
+import { stopAllRuns } from './host-run.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -916,6 +917,7 @@ async function main(): Promise<void> {
     logger.info({ signal }, 'Shutdown signal received');
     proxyServer.close();
     await queue.shutdown(10000);
+    stopAllRuns();
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
   };

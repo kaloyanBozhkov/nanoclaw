@@ -43,6 +43,29 @@ export const HELP_SECTIONS: HelpSection[] = [
         description: 'Restart NanoClaw (asks first if agents are running)',
         ownerOnly: true,
       },
+      {
+        usage: '/scripts',
+        description: 'List package.json scripts in this project, by folder',
+      },
+      {
+        usage: '/run <script>',
+        description:
+          'Run a script on your Mac (outside the container); asks where if it exists in several folders',
+        ownerOnly: true,
+      },
+      {
+        usage: '/running',
+        description: 'Scripts still running (dev servers etc.)',
+      },
+      {
+        usage: '/inspect [script|#n]',
+        description: 'Latest output of a run, full log attached',
+      },
+      {
+        usage: '/run-stop [#n]',
+        description: 'Stop a running script',
+        ownerOnly: true,
+      },
     ],
   },
   {

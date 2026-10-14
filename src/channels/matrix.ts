@@ -25,6 +25,20 @@ import {
 } from '../project-setup.js';
 import { formatRunningAgents, RunningAgent } from '../restart.js';
 import {
+  activeRuns,
+  findScript,
+  formatDuration,
+  HostRun,
+  isValidScriptName,
+  listScripts,
+  packageManagerFor,
+  projectRoots,
+  ScriptLocation,
+  startRun,
+  stopRun,
+  urlsIn,
+} from '../host-run.js';
+import {
   formatBytes,
   formatResetFileList,
   formatResetPreview,
@@ -66,6 +80,11 @@ const CHANNEL_COMMANDS = new Set([
   'new',
   'setup-project',
   'restart-nanoclaw',
+  'run',
+  'running',
+  'run-stop',
+  'inspect',
+  'scripts',
 ]);
 
 /**
@@ -246,6 +265,33 @@ export interface MatrixChannelOpts {
   restartService?: (jid: string) => void;
 }
 
+/** A `/run` whose script exists in several packages, waiting for a pick. */
+interface PendingRunChoice {
+  senderId: string;
+  script: string;
+  choices: ScriptLocation[];
+  expiresAt: number;
+  promptEventId?: string;
+}
+
+const NUMBER_REACTIONS = [
+  '1️⃣',
+  '2️⃣',
+  '3️⃣',
+  '4️⃣',
+  '5️⃣',
+  '6️⃣',
+  '7️⃣',
+  '8️⃣',
+  '9️⃣',
+  '🔟',
+];
+/** After this long a run is reported as still going (dev servers never end). */
+const RUN_STILL_GOING_MS = 2 * 60 * 1000;
+const RUN_REPORT_LINES = 15;
+const MAX_URLS_PER_RUN = 5;
+const RECENT_RUNS_KEPT = 5;
+
 /** A `/restart-nanoclaw` waiting on confirmation because agents are running. */
 interface PendingRestart {
   senderId: string;
@@ -362,6 +408,9 @@ export class MatrixChannel implements Channel {
   private pendingResets = new Map<string, PendingReset>();
   private pendingGitSetups = new Map<string, PendingGitSetup>();
   private pendingRestarts = new Map<string, PendingRestart>();
+  private pendingRunChoices = new Map<string, PendingRunChoice>();
+  /** Finished runs per chat, newest last, for /run-logs after the fact. */
+  private recentRuns = new Map<string, HostRun[]>();
 
   constructor(
     private client: MatrixClient,
@@ -750,6 +799,21 @@ export class MatrixChannel implements Channel {
     if (rel?.rel_type !== 'm.annotation' || typeof rel.key !== 'string') return;
     const chatJid = `${MATRIX_JID_PREFIX}${roomId}`;
 
+    const runChoice = this.pendingRunChoices.get(chatJid);
+    if (
+      runChoice &&
+      runChoice.senderId === ev.sender &&
+      runChoice.promptEventId === rel.event_id
+    ) {
+      const idx = NUMBER_REACTIONS.findIndex(
+        (n) => reactionKey(n) === reactionKey(rel.key),
+      );
+      if (idx >= 0 && idx < runChoice.choices.length) {
+        await this.answerRunChoice(chatJid, runChoice, idx);
+      }
+      return;
+    }
+
     const restart = this.pendingRestarts.get(chatJid);
     if (
       restart &&
@@ -796,6 +860,22 @@ export class MatrixChannel implements Channel {
     sender: string,
     body: string,
   ): Promise<boolean> {
+    const runChoice = this.pendingRunChoices.get(chatJid);
+    if (runChoice && runChoice.senderId === sender) {
+      const trimmed = body.trim().toLowerCase();
+      if (/^\d+$/.test(trimmed)) {
+        const idx = Number(trimmed) - 1;
+        if (idx >= 0 && idx < runChoice.choices.length) {
+          await this.answerRunChoice(chatJid, runChoice, idx);
+          return true;
+        }
+      } else if (trimmed === 'cancel' || trimmed === 'no') {
+        this.pendingRunChoices.delete(chatJid);
+        await this.sendMessage(chatJid, 'Cancelled — nothing was run.');
+        return true;
+      }
+    }
+
     const restart = this.pendingRestarts.get(chatJid);
     if (restart && restart.senderId === sender) {
       const yes = YES_NO[body.toLowerCase().replace(/[.!]+$/, '')];
@@ -849,6 +929,21 @@ export class MatrixChannel implements Channel {
         break;
       case 'restart-nanoclaw':
         await this.startRestart(chatJid, sender);
+        break;
+      case 'scripts':
+        await this.listProjectScripts(chatJid);
+        break;
+      case 'run':
+        await this.startScript(chatJid, sender, rest.join(' ').trim());
+        break;
+      case 'running':
+        await this.listRuns(chatJid);
+        break;
+      case 'inspect':
+        await this.showRunLogs(chatJid, rest.join(' ').trim() || undefined);
+        break;
+      case 'run-stop':
+        await this.stopScript(chatJid, sender, rest[0]);
         break;
     }
     return true;
@@ -1038,7 +1133,8 @@ export class MatrixChannel implements Channel {
       return;
     }
     const running = this.opts.listRunningAgents?.() ?? [];
-    if (running.length === 0) {
+    const scripts = activeRuns();
+    if (running.length === 0 && scripts.length === 0) {
       await this.doRestart(chatJid);
       return;
     }
@@ -1047,11 +1143,28 @@ export class MatrixChannel implements Channel {
       expiresAt: Date.now() + RESET_CONFIRM_TTL_MS,
     };
     this.pendingRestarts.set(chatJid, pending);
-    const n = running.length;
+    const parts: string[] = [];
+    if (running.length) {
+      const n = running.length;
+      parts.push(
+        `⚠️ ${n} agent${n === 1 ? ' is' : 's are'} running and will be stopped by a restart:\n${formatRunningAgents(running)}`,
+      );
+    }
+    if (scripts.length) {
+      const n = scripts.length;
+      parts.push(
+        `⚠️ ${n} /run script${n === 1 ? ' is' : 's are'} running and will be stopped:\n` +
+          scripts
+            .map(
+              (r) =>
+                `- \`${r.script}\` in ${r.label}, up ${formatDuration(Date.now() - r.startedAt.getTime())}`,
+            )
+            .join('\n'),
+      );
+    }
     pending.promptEventId = await this.sendPrompt(
       chatJid,
-      `⚠️ ${n} agent${n === 1 ? ' is' : 's are'} running and will be stopped by a restart:\n` +
-        `${formatRunningAgents(running)}\n\n` +
+      `${parts.join('\n\n')}\n\n` +
         `Restart anyway? Tap ${YES_REACTION} or ${NO_REACTION}, or reply **yes** or **no**.`,
       [YES_REACTION, NO_REACTION],
     );
@@ -1084,6 +1197,292 @@ export class MatrixChannel implements Channel {
     );
     logger.info({ chatJid }, 'Restart requested via /restart-nanoclaw');
     this.opts.restartService!(chatJid);
+  }
+
+  /** Writable project folders mounted for this chat's group, or null. */
+  private async runRoots(chatJid: string): Promise<{
+    group: RegisteredGroup;
+    roots: string[];
+  } | null> {
+    const group = this.opts.registeredGroups()[chatJid];
+    if (!group) {
+      await this.sendMessage(chatJid, 'This chat is not registered.');
+      return null;
+    }
+    const roots = projectRoots(group.containerConfig?.additionalMounts);
+    if (roots.length === 0) {
+      await this.sendMessage(
+        chatJid,
+        '⚠️ This project has no folder mounted, so there are no scripts to run.',
+      );
+      return null;
+    }
+    return { group, roots };
+  }
+
+  /** `/scripts` — every package.json script, grouped by folder. */
+  private async listProjectScripts(chatJid: string): Promise<void> {
+    const ctx = await this.runRoots(chatJid);
+    if (!ctx) return;
+    const byPkg = listScripts(ctx.roots);
+    if (byPkg.size === 0) {
+      await this.sendMessage(chatJid, 'No package.json scripts found.');
+      return;
+    }
+    const lines = ['📜 **Scripts** — run with `/run <name>`', ''];
+    for (const [label, names] of byPkg) {
+      lines.push(`**${label}**`);
+      lines.push(names.map((n) => `\`${n}\``).join(' · '));
+      lines.push('');
+    }
+    await this.sendMessage(chatJid, lines.join('\n').trimEnd());
+  }
+
+  /** `/run <script>` — find it, ask where if it's in several packages, run it. */
+  private async startScript(
+    chatJid: string,
+    sender: string,
+    script: string,
+  ): Promise<void> {
+    if (!isOwnerSender(sender, false)) {
+      await this.sendMessage(chatJid, '⚠️ Only the owner can run scripts.');
+      return;
+    }
+    if (!script) {
+      await this.sendMessage(
+        chatJid,
+        'Usage: /run <script>. /scripts lists what this project has.',
+      );
+      return;
+    }
+    if (!isValidScriptName(script)) {
+      await this.sendMessage(chatJid, `⚠️ "${script}" isn't a script name.`);
+      return;
+    }
+    const ctx = await this.runRoots(chatJid);
+    if (!ctx) return;
+    const matches = findScript(ctx.roots, script);
+    if (matches.length === 0) {
+      await this.sendMessage(
+        chatJid,
+        `No script \`${script}\` in this project. /scripts lists what's there.`,
+      );
+      return;
+    }
+    if (matches.length === 1) {
+      await this.launchScript(
+        chatJid,
+        ctx.group,
+        ctx.roots,
+        script,
+        matches[0],
+      );
+      return;
+    }
+    const choices = matches.slice(0, NUMBER_REACTIONS.length);
+    const pending: PendingRunChoice = {
+      senderId: sender,
+      script,
+      choices,
+      expiresAt: Date.now() + RESET_CONFIRM_TTL_MS,
+    };
+    this.pendingRunChoices.set(chatJid, pending);
+    const list = choices
+      .map(
+        (c, i) =>
+          `${NUMBER_REACTIONS[i]} **${c.label}** — \`${c.command.slice(0, 80)}\``,
+      )
+      .join('\n');
+    pending.promptEventId = await this.sendPrompt(
+      chatJid,
+      `\`${script}\` exists in ${matches.length} places. Which one?\n${list}\n\nTap a number or reply with it (or **cancel**).`,
+      NUMBER_REACTIONS.slice(0, choices.length),
+    );
+  }
+
+  private async answerRunChoice(
+    chatJid: string,
+    pending: PendingRunChoice,
+    idx: number,
+  ): Promise<void> {
+    this.pendingRunChoices.delete(chatJid);
+    if (Date.now() > pending.expiresAt) {
+      await this.sendMessage(
+        chatJid,
+        `That prompt expired — nothing was run. Send /run ${pending.script} again.`,
+      );
+      return;
+    }
+    const ctx = await this.runRoots(chatJid);
+    if (!ctx) return;
+    await this.launchScript(
+      chatJid,
+      ctx.group,
+      ctx.roots,
+      pending.script,
+      pending.choices[idx],
+    );
+  }
+
+  private async launchScript(
+    chatJid: string,
+    group: RegisteredGroup,
+    roots: string[],
+    script: string,
+    loc: ScriptLocation,
+  ): Promise<void> {
+    const root =
+      roots.find((r) => loc.dir === r || loc.dir.startsWith(r + path.sep)) ??
+      loc.dir;
+    const pm = packageManagerFor(loc.dir, root);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const logFile = path.join(
+      GROUPS_DIR,
+      group.folder,
+      'logs',
+      `run-${stamp}-${script.replace(/[^\w.-]+/g, '_')}.log`,
+    );
+    const seenUrls = new Set<string>();
+    let stillGoing: NodeJS.Timeout | undefined;
+
+    await this.sendMessage(
+      chatJid,
+      `▶️ Running \`${script}\` in **${loc.label}** (\`${pm} run ${script}\`)…`,
+    );
+    const run = startRun({
+      chatJid,
+      script,
+      label: loc.label,
+      cwd: loc.dir,
+      logFile,
+      packageManager: pm,
+      onLine: (r, line) => {
+        for (const url of urlsIn(line)) {
+          if (seenUrls.has(url) || seenUrls.size >= MAX_URLS_PER_RUN) continue;
+          seenUrls.add(url);
+          void this.sendMessage(chatJid, `🔗 \`${r.script}\`: ${url}`);
+        }
+      },
+      onExit: (r) => {
+        if (stillGoing) clearTimeout(stillGoing);
+        this.rememberRun(r);
+        void this.sendMessage(chatJid, formatRunResult(r));
+      },
+    });
+    stillGoing = setTimeout(() => {
+      if (run.done) return;
+      void this.sendMessage(
+        chatJid,
+        `⏳ \`${script}\` is still running (#${run.id}). /inspect ${run.id} to see its output, /run-stop ${run.id} to stop it.`,
+      );
+    }, RUN_STILL_GOING_MS);
+    stillGoing.unref();
+  }
+
+  private rememberRun(run: HostRun): void {
+    const list = this.recentRuns.get(run.chatJid) ?? [];
+    list.push(run);
+    while (list.length > RECENT_RUNS_KEPT) list.shift();
+    this.recentRuns.set(run.chatJid, list);
+  }
+
+  /** `/running` — what this chat has running (dev servers and the like). */
+  private async listRuns(chatJid: string): Promise<void> {
+    const runs = activeRuns(chatJid);
+    if (runs.length === 0) {
+      await this.sendMessage(
+        chatJid,
+        'Nothing running. /scripts lists what you can run.',
+      );
+      return;
+    }
+    const lines = runs.map((r) => {
+      const last = r.tail.filter((l) => l.trim()).at(-1);
+      return `**#${r.id}** \`${r.script}\` in ${r.label} — up ${formatDuration(Date.now() - r.startedAt.getTime())}${last ? `\n  ↳ ${last.slice(0, 120)}` : ''}`;
+    });
+    await this.sendMessage(chatJid, `🏃 **Running**\n${lines.join('\n')}`);
+  }
+
+  /** Pick a run by id, or the only/latest one when no id is given. */
+  private pickRun(chatJid: string, id: string | undefined): HostRun | null {
+    const pool = [
+      ...activeRuns(chatJid),
+      ...(this.recentRuns.get(chatJid) ?? []),
+    ];
+    if (id)
+      return pool.find((r) => String(r.id) === id.replace(/^#/, '')) ?? null;
+    const active = activeRuns(chatJid);
+    if (active.length) return active.at(-1)!;
+    return this.recentRuns.get(chatJid)?.at(-1) ?? null;
+  }
+
+  /**
+   * `/inspect [#id|script]` — a run's latest output, with the full log
+   * attached when it's longer than what fits in a message.
+   */
+  private async showRunLogs(chatJid: string, ref?: string): Promise<void> {
+    const run = this.pickRun(chatJid, ref);
+    if (!run) {
+      await this.sendMessage(
+        chatJid,
+        ref ? `No run matching "${ref}". /running lists them.` : 'No runs yet.',
+      );
+      return;
+    }
+    const state = run.done ? 'finished' : 'running';
+    const relLog = path.relative(path.join(GROUPS_DIR, path.sep), run.logFile);
+    await this.sendMessage(
+      chatJid,
+      `📄 **#${run.id}** \`${run.script}\` in ${run.label} (${state})\n` +
+        `\`\`\`\n${run.tail.join('\n') || '(no output yet)'}\n\`\`\`\nFull log: \`groups/${relLog}\``,
+    );
+    // More output than the tail shows → hand over the whole file.
+    let lines = 0;
+    try {
+      lines = fs.readFileSync(run.logFile, 'utf-8').split('\n').length;
+    } catch {
+      return;
+    }
+    if (lines > run.tail.length + 1) {
+      await this.sendMedia(chatJid, run.logFile, { as: 'document' });
+    }
+  }
+
+  /** `/run-stop [id]` — stop a run (the only one if no id is given). */
+  private async stopScript(
+    chatJid: string,
+    sender: string,
+    id?: string,
+  ): Promise<void> {
+    if (!isOwnerSender(sender, false)) {
+      await this.sendMessage(chatJid, '⚠️ Only the owner can stop scripts.');
+      return;
+    }
+    const active = activeRuns(chatJid);
+    if (!id && active.length > 1) {
+      await this.sendMessage(
+        chatJid,
+        `Several are running — say which: ${active.map((r) => `/run-stop ${r.id} (\`${r.script}\`)`).join(', ')}`,
+      );
+      return;
+    }
+    const run = id
+      ? active.find(
+          (r) => String(r.id) === id.replace(/^#/, '') || r.script === id,
+        )
+      : active[0];
+    if (!run) {
+      await this.sendMessage(
+        chatJid,
+        id ? `No running #${id}.` : 'Nothing running.',
+      );
+      return;
+    }
+    stopRun(run);
+    await this.sendMessage(
+      chatJid,
+      `⏹ Stopping \`${run.script}\` (#${run.id})…`,
+    );
   }
 
   private async answerGitSetup(
@@ -1306,3 +1705,15 @@ registerChannel('matrix', (opts: ChannelOpts) => {
       ASSISTANT_NAME,
   );
 });
+
+function formatRunResult(run: HostRun): string {
+  const took = formatDuration(Date.now() - run.startedAt.getTime());
+  const head =
+    run.signal !== null
+      ? `⏹ \`${run.script}\` stopped after ${took}`
+      : run.exitCode === 0
+        ? `✅ \`${run.script}\` finished in ${took}`
+        : `❌ \`${run.script}\` failed (exit ${run.exitCode}) after ${took}`;
+  const tail = run.tail.slice(-RUN_REPORT_LINES).join('\n').trim();
+  return tail ? `${head}\n\`\`\`\n${tail}\n\`\`\`` : head;
+}

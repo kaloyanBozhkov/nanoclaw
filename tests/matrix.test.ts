@@ -65,6 +65,29 @@ vi.mock('../src/image-prep.js', () => ({
         ? src
         : null,
 }));
+const hostRun = vi.hoisted(() => ({
+  matches: [] as { dir: string; label: string; command: string }[],
+  started: [] as Record<string, any>[],
+}));
+vi.mock('../src/host-run.js', () => ({
+  activeRuns: () => [],
+  findScript: () => hostRun.matches,
+  formatDuration: () => '1s',
+  isValidScriptName: (n: string) => /^[\w:.-]+$/.test(n),
+  listScripts: () =>
+    new Map([
+      ['linkbase', ['build', 'dev']],
+      ['linkbase/backend', ['dev', 'deploy:vps']],
+    ]),
+  packageManagerFor: () => 'pnpm',
+  projectRoots: () => ['/koko/linkbase'],
+  startRun: (o: Record<string, any>) => {
+    hostRun.started.push(o);
+    return { id: hostRun.started.length, done: false, ...o };
+  },
+  stopRun: () => {},
+  urlsIn: (l: string) => l.match(/https?:\/\/\S+/g) ?? [],
+}));
 vi.mock('../src/transcribe.js', () => ({
   transcribeVoice: vi.fn(() => 'hello there'),
 }));
@@ -633,6 +656,103 @@ describe('MatrixChannel', () => {
       expect(client.createRoom).not.toHaveBeenCalled();
       expect(opts.registerGroup).not.toHaveBeenCalled();
       expect(sentBodies(client).at(-1)).toContain('already exists');
+    });
+
+    describe('/run', () => {
+      const backend = {
+        dir: '/koko/linkbase/backend',
+        label: 'linkbase/backend',
+        command: 'tsx watch',
+      };
+      const app = {
+        dir: '/koko/linkbase/linkbase',
+        label: 'linkbase/linkbase',
+        command: 'expo start',
+      };
+      beforeEach(() => {
+        hostRun.matches = [];
+        hostRun.started = [];
+      });
+
+      it('runs a unique script in its package with the right manager', async () => {
+        hostRun.matches = [backend];
+        await say('/run deploy:vps');
+        expect(hostRun.started).toHaveLength(1);
+        expect(hostRun.started[0]).toMatchObject({
+          script: 'deploy:vps',
+          cwd: '/koko/linkbase/backend',
+          packageManager: 'pnpm',
+        });
+        expect(sentBodies(client).at(-1)).toContain('pnpm run deploy:vps');
+        expect(opts.onMessage).not.toHaveBeenCalled();
+      });
+
+      it('asks where to run a duplicate, answered by a number tap', async () => {
+        hostRun.matches = [backend, app];
+        await say('/run dev');
+        expect(hostRun.started).toHaveLength(0);
+        expect(sentBodies(client).at(-1)).toContain('exists in 2 places');
+        const seeded = client.sendEvent.mock.calls
+          .filter((c) => c[1] === 'm.reaction')
+          .map((c) => c[2]['m.relates_to'].key);
+        expect(seeded).toEqual(['1️⃣', '2️⃣']);
+
+        await react('2️⃣');
+        expect(hostRun.started[0].cwd).toBe('/koko/linkbase/linkbase');
+      });
+
+      it('takes a typed number too, and cancel', async () => {
+        hostRun.matches = [backend, app];
+        await say('/run dev');
+        await say('1');
+        expect(hostRun.started[0].cwd).toBe('/koko/linkbase/backend');
+
+        await say('/run dev');
+        await say('cancel');
+        expect(hostRun.started).toHaveLength(1);
+        expect(sentBodies(client).at(-1)).toContain('nothing was run');
+      });
+
+      it('is owner-only and checks the name', async () => {
+        hostRun.matches = [backend];
+        await say('/run deploy:vps', '@other:test');
+        await say('/run x;rm');
+        expect(hostRun.started).toHaveLength(0);
+      });
+
+      it('says when the script does not exist', async () => {
+        await say('/run nope');
+        expect(sentBodies(client).at(-1)).toContain('No script `nope`');
+      });
+
+      it('reports the result and posts dev-server links', async () => {
+        hostRun.matches = [app];
+        await say('/run dev:remote');
+        const o = hostRun.started[0];
+        o.onLine({ script: 'dev:remote' }, 'ready on http://localhost:8081');
+        o.onExit({
+          ...o,
+          id: 1,
+          startedAt: new Date(),
+          exitCode: 0,
+          signal: null,
+          tail: ['done'],
+          done: true,
+        });
+        await new Promise((r) => setTimeout(r, 0));
+        const bodies = sentBodies(client);
+        expect(bodies.some((b) => b.includes('http://localhost:8081'))).toBe(
+          true,
+        );
+        expect(bodies.at(-1)).toContain('✅ `dev:remote` finished');
+      });
+
+      it('/scripts lists scripts by folder', async () => {
+        await say('/scripts');
+        const text = sentBodies(client).at(-1)!;
+        expect(text).toContain('**linkbase/backend**');
+        expect(text).toContain('`deploy:vps`');
+      });
     });
 
     describe('/restart-nanoclaw', () => {
