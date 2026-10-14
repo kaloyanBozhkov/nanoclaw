@@ -26,13 +26,16 @@ import {
 import { formatRunningAgents, RunningAgent } from '../restart.js';
 import {
   activeRuns,
+  displayCommand,
   findScript,
   formatDuration,
   HostRun,
   isValidScriptName,
   listScripts,
   packageManagerFor,
+  parseRunInput,
   projectRoots,
+  runArgv,
   ScriptLocation,
   startRun,
   stopRun,
@@ -269,6 +272,7 @@ export interface MatrixChannelOpts {
 interface PendingRunChoice {
   senderId: string;
   script: string;
+  args: string[];
   choices: ScriptLocation[];
   expiresAt: number;
   promptEventId?: string;
@@ -934,7 +938,12 @@ export class MatrixChannel implements Channel {
         await this.listProjectScripts(chatJid);
         break;
       case 'run':
-        await this.startScript(chatJid, sender, rest.join(' ').trim());
+        // Raw remainder, not `rest`: quoted arguments keep their spacing.
+        await this.startScript(
+          chatJid,
+          sender,
+          body.slice(1 + rawCmd.length).trim(),
+        );
         break;
       case 'running':
         await this.listRuns(chatJid);
@@ -1242,16 +1251,22 @@ export class MatrixChannel implements Channel {
   private async startScript(
     chatJid: string,
     sender: string,
-    script: string,
+    input: string,
   ): Promise<void> {
     if (!isOwnerSender(sender, false)) {
       await this.sendMessage(chatJid, '⚠️ Only the owner can run scripts.');
       return;
     }
+    const parsed = parseRunInput(input);
+    if ('error' in parsed) {
+      await this.sendMessage(chatJid, `⚠️ ${parsed.error}`);
+      return;
+    }
+    const { script, args } = parsed;
     if (!script) {
       await this.sendMessage(
         chatJid,
-        'Usage: /run <script>. /scripts lists what this project has.',
+        'Usage: /run <script> [args]. /scripts lists what this project has.',
       );
       return;
     }
@@ -1275,6 +1290,7 @@ export class MatrixChannel implements Channel {
         ctx.group,
         ctx.roots,
         script,
+        args,
         matches[0],
       );
       return;
@@ -1283,6 +1299,7 @@ export class MatrixChannel implements Channel {
     const pending: PendingRunChoice = {
       senderId: sender,
       script,
+      args,
       choices,
       expiresAt: Date.now() + RESET_CONFIRM_TTL_MS,
     };
@@ -1320,6 +1337,7 @@ export class MatrixChannel implements Channel {
       ctx.group,
       ctx.roots,
       pending.script,
+      pending.args,
       pending.choices[idx],
     );
   }
@@ -1329,6 +1347,7 @@ export class MatrixChannel implements Channel {
     group: RegisteredGroup,
     roots: string[],
     script: string,
+    args: string[],
     loc: ScriptLocation,
   ): Promise<void> {
     const root =
@@ -1347,7 +1366,7 @@ export class MatrixChannel implements Channel {
 
     await this.sendMessage(
       chatJid,
-      `▶️ Running \`${script}\` in **${loc.label}** (\`${pm} run ${script}\`)…`,
+      `▶️ Running \`${script}\` in **${loc.label}** (\`${displayCommand(runArgv(pm, script, args))}\`)…`,
     );
     const run = startRun({
       chatJid,
@@ -1356,6 +1375,7 @@ export class MatrixChannel implements Channel {
       cwd: loc.dir,
       logFile,
       packageManager: pm,
+      args,
       onLine: (r, line) => {
         for (const url of urlsIn(line)) {
           if (seenUrls.has(url) || seenUrls.size >= MAX_URLS_PER_RUN) continue;

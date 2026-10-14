@@ -20,6 +20,9 @@ import {
   stopRun,
   urlsIn,
   RUN_LOG_MAX_BYTES,
+  parseRunInput,
+  runArgv,
+  displayCommand,
 } from '../src/host-run.js';
 
 let root: string;
@@ -165,6 +168,70 @@ describe('run log cap', () => {
       '[log capped at 20 MB',
     );
     expect(r.tail.at(-1)).toBe('last line');
+  });
+});
+
+describe('parseRunInput', () => {
+  it('splits the script from quoted arguments', () => {
+    expect(parseRunInput('update:prod "message of update"')).toEqual({
+      script: 'update:prod',
+      args: ['message of update'],
+    });
+    expect(parseRunInput("test -- --watch -t 'login flow'")).toEqual({
+      script: 'test',
+      args: ['--watch', '-t', 'login flow'],
+    });
+  });
+
+  it('treats curly double quotes as quotes but keeps curly apostrophes', () => {
+    expect(
+      parseRunInput('update:prod \u201Cfix: don\u2019t crash\u201D'),
+    ).toEqual({
+      script: 'update:prod',
+      args: ['fix: don\u2019t crash'],
+    });
+    expect(parseRunInput('update:prod it\u2019s done')).toEqual({
+      script: 'update:prod',
+      args: ['it\u2019s', 'done'],
+    });
+  });
+
+  it('keeps spacing inside quotes and handles escapes and empty strings', () => {
+    expect(parseRunInput('x "a  b" c\\ d ""')).toEqual({
+      script: 'x',
+      args: ['a  b', 'c d', ''],
+    });
+  });
+
+  it('reports an unclosed quote', () => {
+    expect(parseRunInput('x "oops')).toEqual({ error: 'Unclosed " quote.' });
+  });
+});
+
+describe('runArgv / displayCommand', () => {
+  it('adds -- only for npm', () => {
+    expect(runArgv('pnpm', 'test', ['-t', 'x'])).toEqual([
+      'pnpm',
+      'run',
+      'test',
+      '-t',
+      'x',
+    ]);
+    expect(runArgv('npm', 'test', ['-t', 'x'])).toEqual([
+      'npm',
+      'run',
+      'test',
+      '--',
+      '-t',
+      'x',
+    ]);
+    expect(runArgv('npm', 'build', [])).toEqual(['npm', 'run', 'build']);
+  });
+
+  it('quotes arguments that need it', () => {
+    expect(
+      displayCommand(['pnpm', 'run', 'update:prod', 'message of update']),
+    ).toBe('pnpm run update:prod "message of update"');
   });
 });
 

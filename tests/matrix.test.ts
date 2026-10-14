@@ -80,6 +80,20 @@ vi.mock('../src/host-run.js', () => ({
       ['linkbase/backend', ['dev', 'deploy:vps']],
     ]),
   packageManagerFor: () => 'pnpm',
+  parseRunInput: (s: string) => {
+    if ((s.match(/"/g) ?? []).length % 2) return { error: 'Unclosed " quote.' };
+    const parts = s.match(/"[^"]*"|\S+/g) ?? [];
+    const [script = '', ...args] = parts.map((p) => p.replace(/^"|"$/g, ''));
+    if (args[0] === '--') args.shift();
+    return { script, args };
+  },
+  runArgv: (pm: string, script: string, args: string[]) => [
+    pm,
+    'run',
+    script,
+    ...args,
+  ],
+  displayCommand: (argv: string[]) => argv.join(' '),
   projectRoots: () => ['/koko/linkbase'],
   startRun: (o: Record<string, any>) => {
     hostRun.started.push(o);
@@ -685,6 +699,24 @@ describe('MatrixChannel', () => {
         });
         expect(sentBodies(client).at(-1)).toContain('pnpm run deploy:vps');
         expect(opts.onMessage).not.toHaveBeenCalled();
+      });
+
+      it('passes quoted arguments through, and keeps them across the picker', async () => {
+        hostRun.matches = [backend];
+        await say('/run update:prod "message of  update"');
+        expect(hostRun.started[0].args).toEqual(['message of  update']);
+
+        hostRun.matches = [backend, app];
+        await say('/run dev -- --port 3001');
+        await react('1️⃣');
+        expect(hostRun.started[1].args).toEqual(['--port', '3001']);
+      });
+
+      it('rejects an unclosed quote', async () => {
+        hostRun.matches = [backend];
+        await say('/run update:prod "oops');
+        expect(hostRun.started).toHaveLength(0);
+        expect(sentBodies(client).at(-1)).toContain('Unclosed');
       });
 
       it('asks where to run a duplicate, answered by a number tap', async () => {

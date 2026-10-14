@@ -48,7 +48,7 @@ export const HELP_SECTIONS: HelpSection[] = [
         description: 'List package.json scripts in this project, by folder',
       },
       {
-        usage: '/run <script>',
+        usage: '/run <script> [args]',
         description:
           'Run a script on your Mac (outside the container); asks where if it exists in several folders',
         ownerOnly: true,

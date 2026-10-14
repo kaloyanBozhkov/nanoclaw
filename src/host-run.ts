@@ -41,6 +41,78 @@ export function isValidScriptName(name: string): boolean {
   return SCRIPT_NAME.test(name) && name.length <= 100;
 }
 
+const MAX_ARGS_LENGTH = 2000;
+
+/**
+ * Split `/run` input into the script name and its arguments, shell-style:
+ * "double" and 'single' quotes group words, backslash escapes the next
+ * character. Phone keyboards' curly double quotes count as straight ones. A leading
+ * `--` before the arguments is dropped (it's added back where npm needs it).
+ */
+export function parseRunInput(
+  input: string,
+): { script: string; args: string[] } | { error: string } {
+  if (input.length > MAX_ARGS_LENGTH) return { error: 'Arguments too long.' };
+  // Curly double quotes are quotes; curly apostrophes stay literal — phones
+  // put them in ordinary words (it’s), where they must not open a quote.
+  const text = input.replace(/[\u201C\u201D\u201E]/g, '"');
+  const tokens: string[] = [];
+  let cur = '';
+  let inToken = false;
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (ch === '\\' && quote === '"' && i + 1 < text.length)
+        cur += text[++i];
+      else cur += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      inToken = true;
+    } else if (ch === '\\' && i + 1 < text.length) {
+      cur += text[++i];
+      inToken = true;
+    } else if (/\s/.test(ch)) {
+      if (inToken) tokens.push(cur);
+      cur = '';
+      inToken = false;
+    } else {
+      cur += ch;
+      inToken = true;
+    }
+  }
+  if (quote) {
+    return {
+      error:
+        quote === "'"
+          ? 'Unclosed \' quote. Wrap text containing an apostrophe in "double quotes".'
+          : 'Unclosed " quote.',
+    };
+  }
+  if (inToken) tokens.push(cur);
+  const [script = '', ...args] = tokens;
+  if (args[0] === '--') args.shift();
+  return { script, args };
+}
+
+/** `<pm> run <script> [args]` argv; npm needs `--` before script arguments. */
+export function runArgv(pm: string, script: string, args: string[]): string[] {
+  if (args.length === 0) return [pm, 'run', script];
+  return pm === 'npm'
+    ? [pm, 'run', script, '--', ...args]
+    : [pm, 'run', script, ...args];
+}
+
+/** How the command reads in chat, e.g. pnpm run update:prod "release notes". */
+export function displayCommand(argv: string[]): string {
+  return argv
+    .map((a) =>
+      /^[\w:.@/=+-]+$/.test(a) ? a : `"${a.replace(/(["\\$`])/g, '\\$1')}"`,
+    )
+    .join(' ');
+}
+
 export interface ScriptLocation {
   /** Absolute package directory. */
   dir: string;
@@ -172,9 +244,11 @@ export interface StartRunOptions {
   label: string;
   cwd: string;
   logFile: string;
-  /** Executable + args. Defaults to `<pm> run <script>` in a login shell. */
+  /** Executable + args. Defaults to `<pm> run <script> [args]` in a login shell. */
   command?: [string, ...string[]];
   packageManager?: string;
+  /** Arguments passed through to the script. */
+  args?: string[];
   onLine?: (run: HostRun, line: string) => void;
   onExit?: (run: HostRun) => void;
 }
@@ -184,14 +258,13 @@ let nextId = 1;
 
 export function startRun(opts: StartRunOptions): HostRun {
   // A login shell gives the owner's PATH (nvm, pnpm, Homebrew) and env, as if
-  // typed in their terminal. Script and package manager go in as $0/$1 —
-  // never spliced into the command string.
+  // typed in their terminal. The command goes in as positional parameters
+  // ($0 "$@") — never spliced into the shell string, so arguments can't inject.
   const [bin, ...args] = opts.command ?? [
     process.env.SHELL || '/bin/zsh',
     '-lc',
-    'exec "$0" run "$1"',
-    opts.packageManager ?? 'npm',
-    opts.script,
+    'exec "$0" "$@"',
+    ...runArgv(opts.packageManager ?? 'npm', opts.script, opts.args ?? []),
   ];
   fs.mkdirSync(path.dirname(opts.logFile), { recursive: true });
   const log = fs.createWriteStream(opts.logFile, { flags: 'a' });
