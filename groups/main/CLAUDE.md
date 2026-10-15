@@ -17,6 +17,12 @@ below for how to pull it in when you need it.
 Changing NanoClaw's own code means editing on the host — the mount is read-only
 by design so an agent can't rewrite the host application it runs inside.
 
+## Logs and output files
+
+Never write logs, captured command output (`cmd > out.log`, `| tee build.log`) or other scratch files inside a project repo — anything under `/workspace/extra/`, or on the host (godmode) under `~/Documents/koko/`, `~/Documents/eh/` or any other repo. They end up as untracked files that get committed by accident. Write them to `/workspace/group/logs/` instead (on the host: `~/Documents/ai/nanoclaw/groups/<this group's folder>/logs/`), which is outside every repo and cleared after 14 days. When the user wants a package.json script run on their Mac, point them to `/run <script>` — it logs there automatically.
+
+**Exception:** if the user explicitly tells you to write a file to a specific place inside a repo, do it.
+
 ## Consumables
 
 Reference documents are **not** loaded here by default. Send `/consume` (or

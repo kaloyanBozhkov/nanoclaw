@@ -281,6 +281,12 @@ Never commit `.npmrc` — it lives in the container's per-group `$HOME` and is n
 - No external data transmission unless defined in DoR
 - Verify branch before implementation — prefer a feature branch over committing straight to main/master
 
+## Logs and output files
+
+Never write logs, captured command output (`cmd > out.log`, `| tee build.log`) or other scratch files inside a project repo — anything under `/workspace/extra/`, or on the host (godmode) under `~/Documents/koko/`, `~/Documents/eh/` or any other repo. They end up as untracked files that get committed by accident. Write them to `/workspace/group/logs/` instead (on the host: `~/Documents/ai/nanoclaw/groups/<this group's folder>/logs/`), which is outside every repo and cleared after 14 days. When the user wants a package.json script run on their Mac, point them to `/run <script>` — it logs there automatically.
+
+**Exception:** if the user explicitly tells you to write a file to a specific place inside a repo, do it.
+
 ## Git Discipline
 
 - Verify branch before implementation (`git branch --show-current`) and say which branch you're on
