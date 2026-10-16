@@ -18,6 +18,9 @@ groups/*/**
 # Secrets
 *.keys.json
 .env
+# Editor crash saves and backups of .env (nano writes .env.save) — they hold secrets
+.env.*
+!.env.example
 
 # Temp files
 .tmp-*
