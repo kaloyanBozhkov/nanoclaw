@@ -125,6 +125,32 @@ describe('running', () => {
     expect(activeRuns()).toHaveLength(0);
   });
 
+  it('restarts numbering at 1 once nothing is running', async () => {
+    const first = await run('0');
+    const second = await run('0');
+    expect(first.id).toBe(1);
+    expect(second.id).toBe(1);
+  });
+
+  it('numbers concurrent runs upward', async () => {
+    const start = (script: string) =>
+      new Promise<HostRun>((resolve) => {
+        const r = startRun({
+          chatJid: 'mx:!r:x',
+          script,
+          label: 'linkbase',
+          cwd: root,
+          logFile: path.join(root, 'logs', `${script}.log`),
+          command: [process.execPath, '-e', 'setTimeout(() => {}, 300)'],
+          onExit: resolve,
+        });
+        ids.push(r.id);
+      });
+    const ids: number[] = [];
+    await Promise.all([start('a'), start('b'), start('c')]);
+    expect(ids).toEqual([1, 2, 3]);
+  });
+
   it('stops a long-running process', async () => {
     let started!: HostRun;
     const exited = new Promise<HostRun>((resolve) => {

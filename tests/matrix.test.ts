@@ -68,6 +68,7 @@ vi.mock('../src/image-prep.js', () => ({
 const hostRun = vi.hoisted(() => ({
   matches: [] as { dir: string; label: string; command: string }[],
   started: [] as Record<string, any>[],
+  stopped: [] as Record<string, any>[],
 }));
 vi.mock('../src/host-run.js', () => ({
   activeRuns: () => [],
@@ -96,10 +97,16 @@ vi.mock('../src/host-run.js', () => ({
   displayCommand: (argv: string[]) => argv.join(' '),
   projectRoots: () => ['/koko/linkbase'],
   startRun: (o: Record<string, any>) => {
-    hostRun.started.push(o);
-    return { id: hostRun.started.length, done: false, ...o };
+    const run = {
+      id: hostRun.started.length + 1,
+      done: false,
+      tail: ['booting'],
+      ...o,
+    };
+    hostRun.started.push(run);
+    return run;
   },
-  stopRun: () => {},
+  stopRun: (r: Record<string, any>) => hostRun.stopped.push(r),
   urlsIn: (l: string) => l.match(/https?:\/\/\S+/g) ?? [],
 }));
 vi.mock('../src/transcribe.js', () => ({
@@ -686,6 +693,61 @@ describe('MatrixChannel', () => {
       beforeEach(() => {
         hostRun.matches = [];
         hostRun.started = [];
+        hostRun.stopped = [];
+      });
+
+      const seededKeys = () =>
+        client.sendEvent.mock.calls
+          .filter((c) => c[1] === 'm.reaction')
+          .map((c) => c[2]['m.relates_to'].key);
+
+      it('seeds ❌ and 📄 on the start message; ❌ stops that run', async () => {
+        hostRun.matches = [backend];
+        await say('/run dev:remote');
+        expect(sentBodies(client).at(-1)).toContain(
+          '▶️ Running `dev:remote` (#1)',
+        );
+        expect(seededKeys()).toEqual(['❌', '📄']);
+
+        await react('❌');
+        expect(hostRun.stopped).toEqual([hostRun.started[0]]);
+        expect(sentBodies(client).at(-1)).toContain(
+          'Stopping `dev:remote` (#1)',
+        );
+      });
+
+      it('📄 posts the logs, again with ❌ and 📄', async () => {
+        hostRun.matches = [backend];
+        await say('/run dev:remote');
+        client.sendEvent.mockClear();
+        await react('📄');
+        expect(sentBodies(client).at(-1)).toContain('📄 **#1** `dev:remote`');
+        expect(sentBodies(client).at(-1)).toContain('booting');
+        expect(seededKeys()).toEqual(['❌', '📄']);
+      });
+
+      it('a finished run gets only 📄, and ❌ on it says so', async () => {
+        hostRun.matches = [backend];
+        await say('/run build');
+        const run = hostRun.started[0];
+        run.done = true;
+        run.exitCode = 0;
+        run.signal = null;
+        run.startedAt = new Date();
+        client.sendEvent.mockClear();
+        run.onExit(run);
+        await new Promise((r) => setTimeout(r, 0));
+        expect(seededKeys()).toEqual(['📄']);
+        await react('❌');
+        expect(hostRun.stopped).toHaveLength(0);
+        expect(sentBodies(client).at(-1)).toContain('already finished');
+      });
+
+      it('ignores ❌ from anyone but the owner', async () => {
+        hostRun.matches = [backend];
+        await say('/run dev:remote');
+        await react('❌', '@other:test');
+        expect(hostRun.stopped).toHaveLength(0);
       });
 
       it('runs a unique script in its package with the right manager', async () => {

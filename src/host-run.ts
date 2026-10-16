@@ -274,6 +274,8 @@ export function startRun(opts: StartRunOptions): HostRun {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, FORCE_COLOR: '0' },
   });
+  // Numbering restarts once nothing is running, so ids stay small.
+  if (runs.size === 0) nextId = 1;
   const run: HostRun = {
     id: nextId++,
     chatJid: opts.chatJid,

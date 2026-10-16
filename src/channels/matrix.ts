@@ -295,6 +295,8 @@ const RUN_STILL_GOING_MS = 2 * 60 * 1000;
 const RUN_REPORT_LINES = 15;
 const MAX_URLS_PER_RUN = 5;
 const RECENT_RUNS_KEPT = 5;
+/** Run messages whose ❌/📄 reactions are remembered (oldest dropped). */
+const RUN_MESSAGES_KEPT = 300;
 
 /** A `/restart-nanoclaw` waiting on confirmation because agents are running. */
 interface PendingRestart {
@@ -413,6 +415,11 @@ export class MatrixChannel implements Channel {
   private pendingGitSetups = new Map<string, PendingGitSetup>();
   private pendingRestarts = new Map<string, PendingRestart>();
   private pendingRunChoices = new Map<string, PendingRunChoice>();
+  /**
+   * Run messages → their run, so ❌ (stop) and 📄 (logs) taps act on that
+   * exact run even after numbering restarts. Insertion-ordered, oldest dropped.
+   */
+  private runMessages = new Map<string, HostRun>();
   /** Finished runs per chat, newest last, for /run-logs after the fact. */
   private recentRuns = new Map<string, HostRun[]>();
 
@@ -802,6 +809,18 @@ export class MatrixChannel implements Channel {
     const rel = ev.content['m.relates_to'];
     if (rel?.rel_type !== 'm.annotation' || typeof rel.key !== 'string') return;
     const chatJid = `${MATRIX_JID_PREFIX}${roomId}`;
+
+    const tapped = this.runMessages.get(rel.event_id);
+    if (tapped && isOwnerSender(ev.sender, false)) {
+      if (lookupReaction({ [NO_REACTION]: true }, rel.key)) {
+        await this.stopRunFor(chatJid, tapped);
+        return;
+      }
+      if (lookupReaction({ [LIST_REACTION]: true }, rel.key)) {
+        await this.postRunLogs(chatJid, tapped);
+        return;
+      }
+    }
 
     const runChoice = this.pendingRunChoices.get(chatJid);
     if (
@@ -1364,10 +1383,6 @@ export class MatrixChannel implements Channel {
     const seenUrls = new Set<string>();
     let stillGoing: NodeJS.Timeout | undefined;
 
-    await this.sendMessage(
-      chatJid,
-      `▶️ Running \`${script}\` in **${loc.label}** (\`${displayCommand(runArgv(pm, script, args))}\`)…`,
-    );
     const run = startRun({
       chatJid,
       script,
@@ -1386,17 +1401,42 @@ export class MatrixChannel implements Channel {
       onExit: (r) => {
         if (stillGoing) clearTimeout(stillGoing);
         this.rememberRun(r);
-        void this.sendMessage(chatJid, formatRunResult(r));
+        void this.sendRunPrompt(chatJid, r, formatRunResult(r));
       },
     });
+    await this.sendRunPrompt(
+      chatJid,
+      run,
+      `▶️ Running \`${script}\` (#${run.id}) in **${loc.label}** (\`${displayCommand(runArgv(pm, script, args))}\`)…\n` +
+        `Tap ${NO_REACTION} to stop it, ${LIST_REACTION} for its logs.`,
+    );
     stillGoing = setTimeout(() => {
       if (run.done) return;
-      void this.sendMessage(
+      void this.sendRunPrompt(
         chatJid,
-        `⏳ \`${script}\` is still running (#${run.id}). /inspect ${run.id} to see its output, /run-stop ${run.id} to stop it.`,
+        run,
+        `⏳ \`${script}\` is still running (#${run.id}). Tap ${NO_REACTION} to stop it, ${LIST_REACTION} for its logs.`,
       );
     }, RUN_STILL_GOING_MS);
     stillGoing.unref();
+  }
+
+  /**
+   * Post a message about a run with ❌ (stop, while it's running) and 📄
+   * (logs) seeded, and remember which run it belongs to.
+   */
+  private async sendRunPrompt(
+    chatJid: string,
+    run: HostRun,
+    text: string,
+  ): Promise<void> {
+    const reactions = run.done ? [LIST_REACTION] : [NO_REACTION, LIST_REACTION];
+    const eventId = await this.sendPrompt(chatJid, text, reactions);
+    if (!eventId) return;
+    this.runMessages.set(eventId, run);
+    while (this.runMessages.size > RUN_MESSAGES_KEPT) {
+      this.runMessages.delete(this.runMessages.keys().next().value!);
+    }
   }
 
   private rememberRun(run: HostRun): void {
@@ -1449,10 +1489,16 @@ export class MatrixChannel implements Channel {
       );
       return;
     }
+    await this.postRunLogs(chatJid, run);
+  }
+
+  /** A run's latest output (❌/📄 seeded), plus the full log when longer. */
+  private async postRunLogs(chatJid: string, run: HostRun): Promise<void> {
     const state = run.done ? 'finished' : 'running';
     const relLog = path.relative(path.join(GROUPS_DIR, path.sep), run.logFile);
-    await this.sendMessage(
+    await this.sendRunPrompt(
       chatJid,
+      run,
       `📄 **#${run.id}** \`${run.script}\` in ${run.label} (${state})\n` +
         `\`\`\`\n${run.tail.join('\n') || '(no output yet)'}\n\`\`\`\nFull log: \`groups/${relLog}\``,
     );
@@ -1495,6 +1541,17 @@ export class MatrixChannel implements Channel {
       await this.sendMessage(
         chatJid,
         id ? `No running #${id}.` : 'Nothing running.',
+      );
+      return;
+    }
+    await this.stopRunFor(chatJid, run);
+  }
+
+  private async stopRunFor(chatJid: string, run: HostRun): Promise<void> {
+    if (run.done) {
+      await this.sendMessage(
+        chatJid,
+        `\`${run.script}\` (#${run.id}) already finished.`,
       );
       return;
     }
