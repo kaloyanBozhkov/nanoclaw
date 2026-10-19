@@ -464,6 +464,33 @@ function shouldClose(): boolean {
 }
 
 /**
+ * Background tasks (subagents, backgrounded Bash) still running in the current
+ * query. Replaced wholesale by every `background_tasks_changed` message, as the
+ * SDK asks. Closing the container while this is non-empty kills them
+ * mid-tool-call and hands each one Claude Code's "The user doesn't want to take
+ * this action right now. STOP…" text, which the agent then reads as the user
+ * telling it to stop.
+ */
+let liveBackgroundTasks = new Set<string>();
+
+/**
+ * Ending the input stream doesn't stop the CLI at once — it finishes the turn
+ * in flight — but every tool call made after it is cancelled with that same
+ * STOP text, because the hook round-trip needs the stream. So a close also
+ * waits for the main agent to finish its turn and stay quiet this long: the
+ * last background task ending queues a notification that starts a new turn
+ * a moment later.
+ */
+const CLOSE_QUIET_MS = 15 * 1000;
+
+/**
+ * Stop holding a close once the query has been silent this long — a task that
+ * never settles. Measured from the last SDK message, not from the close
+ * request: a healthy autonomous run can keep agents busy for hours.
+ */
+const CLOSE_STALL_CAP_MS = 45 * 60 * 1000;
+
+/**
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
  */
@@ -764,6 +791,11 @@ async function runQuery(
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
   let closedDuringQuery = false;
+  // The background-task level is per CLI process, and each query starts one.
+  liveBackgroundTasks = new Set();
+  let turnInProgress = true; // the prompt is already queued
+  let lastActivityAt = Date.now();
+  let closeHeld = false;
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
     // An AskUserQuestion is on screen waiting for its answer. Draining here
@@ -772,7 +804,32 @@ async function runQuery(
       setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
       return;
     }
-    if (shouldClose()) {
+    // The host asks to close as soon as a turn ends — to make way for a
+    // scheduled task, or on idle — even when that turn left background agents
+    // working. Leave the sentinel in place until they and the main agent are
+    // done (or the query stalls), and keep piping messages in meanwhile.
+    let holdClose = false;
+    if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
+      const quietMs = Date.now() - lastActivityAt;
+      const busy =
+        liveBackgroundTasks.size > 0 ||
+        turnInProgress ||
+        quietMs < CLOSE_QUIET_MS;
+      if (busy && quietMs < CLOSE_STALL_CAP_MS) {
+        holdClose = true;
+        if (!closeHeld) {
+          closeHeld = true;
+          log(
+            `Close requested with ${liveBackgroundTasks.size} background task(s) running${turnInProgress ? ' and a turn in progress' : ''}, holding it until they finish`,
+          );
+        }
+      } else if (busy) {
+        log(
+          `No activity for ${CLOSE_STALL_CAP_MS / 60000} min with ${liveBackgroundTasks.size} background task(s) open, closing anyway`,
+        );
+      }
+    }
+    if (!holdClose && shouldClose()) {
       log('Close sentinel detected during query, ending stream');
       closedDuringQuery = true;
       stream.end();
@@ -789,6 +846,8 @@ async function runQuery(
       } else {
         stream.push(msg.text);
       }
+      turnInProgress = true;
+      lastActivityAt = Date.now();
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -1047,6 +1106,15 @@ async function runQuery(
     activeQuery = q;
     for await (const message of q) {
       messageCount++;
+      lastActivityAt = Date.now();
+      // Subagents stream their messages through here too, tagged with the
+      // tool call that spawned them; only the main agent's own count as a turn.
+      if (message.type === 'result') turnInProgress = false;
+      else if (
+        (message.type === 'assistant' || message.type === 'user') &&
+        !message.parent_tool_use_id
+      )
+        turnInProgress = true;
       const msgType =
         message.type === 'system'
           ? `system/${(message as { subtype?: string }).subtype}`
@@ -1077,6 +1145,19 @@ async function runQuery(
         };
         log(
           `Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`,
+        );
+      }
+
+      if (
+        message.type === 'system' &&
+        (message as { subtype?: string }).subtype === 'background_tasks_changed'
+      ) {
+        const { tasks } = message as {
+          tasks: { task_id: string; ambient?: boolean }[];
+        };
+        // Ambient tasks are watchers, not work — they never settle on their own.
+        liveBackgroundTasks = new Set(
+          tasks.filter((t) => !t.ambient).map((t) => t.task_id),
         );
       }
 
