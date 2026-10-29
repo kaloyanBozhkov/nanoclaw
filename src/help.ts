@@ -97,6 +97,21 @@ export const HELP_SECTIONS: HelpSection[] = [
         ownerOnly: true,
       },
       {
+        usage: '/mounts',
+        description: 'Folders mounted into this chat’s agent',
+      },
+      {
+        usage: '/mount <path> [ro|rw] [as <name>]',
+        description:
+          'Mount a host folder at /workspace/extra/<name> (read-only unless rw)',
+        ownerOnly: true,
+      },
+      {
+        usage: '/unmount <path|name>',
+        description: 'Remove a folder added with /mount',
+        ownerOnly: true,
+      },
+      {
         usage: '/switch <org>',
         description: 'Switch Anthropic account',
         ownerOnly: true,

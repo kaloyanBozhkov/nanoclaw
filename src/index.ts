@@ -87,6 +87,7 @@ import {
   formatResetToolsNote,
   withResetToolDefaults,
 } from './mcp-tools.js';
+import { addMount, formatMounts, removeMount } from './mounts.js';
 import {
   formatSyncOutcomes,
   setHostPrismaNotifier,
@@ -1314,6 +1315,55 @@ async function main(): Promise<void> {
     );
   }
 
+  // "/mounts" — extra host folders this chat's container gets. "/mount <path>"
+  // and "/unmount <path|name>" change them (owner only). Mounts are fixed at
+  // container start, so a change closes the running container like /tools.
+  async function handleMountsCommand(
+    chatJid: string,
+    command: 'mounts' | 'mount' | 'unmount',
+    arg: string,
+    isOwner: boolean,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+    const isMain = group.isMain === true;
+
+    if (command === 'mounts') {
+      await channel.sendMessage(chatJid, formatMounts(group, isMain));
+      return;
+    }
+    if (!isOwner) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ Only the owner can change mounts.',
+      );
+      return;
+    }
+
+    const change =
+      command === 'mount'
+        ? addMount(group, isMain, arg)
+        : removeMount(group, arg);
+    if (!change.ok || !change.updated) {
+      await channel.sendMessage(chatJid, change.message);
+      return;
+    }
+
+    try {
+      setRegisteredGroup(chatJid, change.updated);
+      registeredGroups[chatJid] = change.updated;
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to persist mounts');
+      await channel.sendMessage(chatJid, '⚠️ Failed to save mounts.');
+      return;
+    }
+
+    queue.closeStdin(chatJid);
+    await channel.sendMessage(chatJid, change.message);
+  }
+
   // "/git-info" — branch of every mounted repo on the user's machine vs the
   // agent, plus any worktrees. Read-only, so anyone in the chat may ask.
   async function handleGitInfoCommand(chatJid: string): Promise<void> {
@@ -1950,6 +2000,26 @@ async function main(): Promise<void> {
           (toolsMatch[1] ?? '').trim(),
           isOwner,
         ).catch((err) => logger.error({ err, chatJid }, 'Tools command error'));
+        return;
+      }
+
+      // /mounts, /mount <path>, /unmount <path|name> — extra host folders.
+      const mountMatch =
+        /^\/(mounts|mount|unmount)(?:@\S+)?(?:\s+(.*))?$/i.exec(trimmed);
+      if (mountMatch) {
+        const command = mountMatch[1].toLowerCase() as
+          | 'mounts'
+          | 'mount'
+          | 'unmount';
+        const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
+        handleMountsCommand(
+          chatJid,
+          command,
+          (mountMatch[2] ?? '').trim(),
+          isOwner,
+        ).catch((err) =>
+          logger.error({ err, chatJid }, 'Mounts command error'),
+        );
         return;
       }
 

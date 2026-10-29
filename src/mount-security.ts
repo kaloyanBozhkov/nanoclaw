@@ -19,9 +19,11 @@ const logger = pino({
   transport: { target: 'pino-pretty', options: { colorize: true } },
 });
 
-// Cache the allowlist in memory - only reloads on process restart
+// Cache the allowlist in memory, keyed by the file's mtime: an edit on the host
+// takes effect on the next check (e.g. the next /mount) without a restart.
 let cachedAllowlist: MountAllowlist | null = null;
 let allowlistLoadError: string | null = null;
+let cachedMtimeMs: number | null = null;
 
 /**
  * Default blocked patterns - paths that should never be mounted
@@ -46,12 +48,27 @@ const DEFAULT_BLOCKED_PATTERNS = [
   '.secret',
 ];
 
+function allowlistMtimeMs(): number | null {
+  try {
+    return fs.statSync(MOUNT_ALLOWLIST_PATH).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Load the mount allowlist from the external config location.
  * Returns null if the file doesn't exist or is invalid.
- * Result is cached in memory for the lifetime of the process.
+ * Result is cached in memory until the file changes.
  */
 export function loadMountAllowlist(): MountAllowlist | null {
+  const mtimeMs = allowlistMtimeMs();
+  if (mtimeMs !== cachedMtimeMs) {
+    cachedAllowlist = null;
+    allowlistLoadError = null;
+    cachedMtimeMs = mtimeMs;
+  }
+
   if (cachedAllowlist !== null) {
     return cachedAllowlist;
   }
@@ -121,7 +138,7 @@ export function loadMountAllowlist(): MountAllowlist | null {
 /**
  * Expand ~ to home directory and resolve to absolute path
  */
-function expandPath(p: string): string {
+export function expandPath(p: string): string {
   const homeDir = process.env.HOME || os.homedir();
   if (p.startsWith('~/')) {
     return path.join(homeDir, p.slice(2));

@@ -2,6 +2,9 @@ export interface AdditionalMount {
   hostPath: string; // Absolute path on host (supports ~ for home)
   containerPath?: string; // Optional — defaults to basename of hostPath. Mounted at /workspace/extra/{value}
   readonly?: boolean; // Default: true for safety
+  // Added from chat with /mount, so /unmount may remove it. Mounts set up any
+  // other way (the project folder, hand-registered repos) stay protected.
+  addedFromChat?: boolean;
 }
 
 /**
