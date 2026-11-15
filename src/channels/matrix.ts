@@ -377,6 +377,9 @@ function resetReactionKeys(hasCache: boolean, withList: boolean): string[] {
   return keys;
 }
 
+/** A lone sunrise emoji is a shortcut for `/new`. */
+const NEW_SHORTCUTS = new Set(['\u2600', '\u{1F31E}', '\u{1F305}']);
+
 /** The typed answers to a `/new` prompt, standing in for Telegram's buttons. */
 const RESET_ANSWERS: Record<string, 'all' | 'session' | 'no' | 'list'> = {
   yes: 'all',
@@ -711,6 +714,7 @@ export class MatrixChannel implements Channel {
       timestamp,
       is_from_me: false,
       images,
+      reply_to: content['m.relates_to']?.['m.in_reply_to']?.event_id,
     });
 
     logger.info(
@@ -925,6 +929,12 @@ export class MatrixChannel implements Channel {
         await this.answerReset(chatJid, pending, answer);
         return true;
       }
+    }
+
+    // Matched without U+FE0F so ☀️ and a bare ☀ both count.
+    if (NEW_SHORTCUTS.has(body.replace(/\uFE0F/g, ''))) {
+      await this.startReset(chatJid, sender);
+      return true;
     }
 
     if (!body.startsWith('/')) return false;
@@ -1585,8 +1595,16 @@ export class MatrixChannel implements Channel {
     }
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
-    await this.sendText(jid, text);
+  async sendMessage(jid: string, text: string): Promise<string | undefined> {
+    return this.sendText(jid, text);
+  }
+
+  async deleteMessage(jid: string, messageId: string): Promise<void> {
+    await this.client.redact(
+      jid.slice(MATRIX_JID_PREFIX.length),
+      messageId,
+      'Removed by NanoClaw',
+    );
   }
 
   /** Send a prompt and seed one reaction per choice; returns its event ID. */

@@ -78,6 +78,15 @@ export const GIT_SAFETY_STATE_PATH = path.join(
   'nanoclaw',
   'git-safety.json',
 );
+// Telegram relay links: bot tokens and approved senders per room. Same home as
+// godmode — a container must never read a bot token or approve itself a
+// sender. See telegram-relay.ts.
+export const TELEGRAM_LINKS_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'telegram-links.json',
+);
 // Host Prisma sync: hash of each schema the host last generated a client for.
 // See host-prisma.ts.
 export const HOST_PRISMA_STATE_PATH = path.join(
@@ -182,9 +191,9 @@ export interface ModelChoice {
 export const AVAILABLE_MODELS: ModelChoice[] = [
   // Current generation first — bare "opus"/"fable"/"sonnet"/"haiku" always
   // resolve to the newest. Previous generations stay selectable by explicit
-  // alias for rollback. Verified against GET /v1/models on 2026-09-22.
+  // alias for rollback. Verified against GET /v1/models on 2026-11-10.
   { alias: 'opus', id: 'claude-opus-5-5', label: 'Opus 5.5' },
-  { alias: 'fable', id: 'claude-fable-5-1', label: 'Fable 5.1' },
+  { alias: 'fable', id: 'claude-fable-5-2', label: 'Fable 5.2' },
   { alias: 'sonnet', id: 'claude-sonnet-5', label: 'Sonnet 5' },
   { alias: 'haiku', id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
   { alias: 'opus-5', id: 'claude-opus-5', label: 'Opus 5 (previous)' },
@@ -195,6 +204,7 @@ export const AVAILABLE_MODELS: ModelChoice[] = [
     id: 'claude-sonnet-4-6',
     label: 'Sonnet 4.6 (previous)',
   },
+  { alias: 'fable-5.1', id: 'claude-fable-5-1', label: 'Fable 5.1 (previous)' },
 ];
 
 /**

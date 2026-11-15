@@ -122,6 +122,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { TelegramRelay } from './telegram-relay.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -156,6 +157,8 @@ const pendingConsumables: Record<string, string[]> = {};
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+/** Telegram bots linked to rooms with `/telegram link`; set once channels connect. */
+let telegramRelay: TelegramRelay | null = null;
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -281,6 +284,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     { group: group.name, messageCount: missedMessages.length },
     'Processing messages',
   );
+  telegramRelay?.noteBatch(chatJid, missedMessages);
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -343,6 +347,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         if (text) {
           await channel.sendMessage(chatJid, text);
           outputSentToUser = true;
+          await telegramRelay?.mirrorText(chatJid, text);
         }
         // Only reset idle timer on actual results, not session-update markers (result: null)
         resetIdleTimer();
@@ -852,6 +857,7 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
+            telegramRelay?.noteBatch(chatJid, messagesToSend);
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)
@@ -930,6 +936,7 @@ async function main(): Promise<void> {
     proxyServer.close();
     await queue.shutdown(10000);
     stopAllRuns();
+    telegramRelay?.stop();
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
   };
@@ -1865,6 +1872,44 @@ async function main(): Promise<void> {
     );
   }
 
+  // "/telegram ..." — link a Telegram bot to this room; see telegram-relay.ts.
+  // A link message carries a bot token, so it is removed from the room first,
+  // whoever sent it and whether or not it works.
+  async function handleTelegramCommand(
+    chatJid: string,
+    msg: NewMessage,
+    arg: string,
+    isOwner: boolean,
+  ): Promise<void> {
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+    if (!telegramRelay) {
+      await channel.sendMessage(
+        chatJid,
+        '⚠️ The Telegram relay isn’t running.',
+      );
+      return;
+    }
+    let tokenNote = '';
+    if (/^link\s+\S/i.test(arg)) {
+      try {
+        if (!channel.deleteMessage) throw new Error('unsupported');
+        await channel.deleteMessage(chatJid, msg.id);
+      } catch (err) {
+        logger.warn({ err, chatJid }, 'Could not remove bot token message');
+        tokenNote =
+          '\n\n⚠️ I couldn’t delete your message with the token — please delete it yourself.';
+      }
+    }
+    const reply = await telegramRelay.handleCommand(
+      chatJid,
+      arg,
+      isOwner,
+      msg.sender,
+    );
+    await channel.sendMessage(chatJid, reply + tokenNote);
+  }
+
   function isConsumeCommand(text: string): boolean {
     const t = text.trim().toLowerCase();
     return (
@@ -2029,6 +2074,23 @@ async function main(): Promise<void> {
         return;
       }
 
+      // /telegram [link <token>|unlink|allow|deny] — Telegram bot for this room.
+      const telegramMatch = /^\/telegram(?:@\S+)?(?:\s+([\s\S]*))?$/i.exec(
+        trimmed,
+      );
+      if (telegramMatch) {
+        const isOwner = isOwnerSender(msg.sender, msg.is_from_me === true);
+        handleTelegramCommand(
+          chatJid,
+          msg,
+          (telegramMatch[1] ?? '').trim(),
+          isOwner,
+        ).catch((err) =>
+          logger.error({ err, chatJid }, 'Telegram command error'),
+        );
+        return;
+      }
+
       // /help — list every intercepted command.
       if (/^\/help(?:@\S+)?$/i.test(trimmed)) {
         const channel = findChannel(channels, chatJid);
@@ -2102,6 +2164,18 @@ async function main(): Promise<void> {
           }
           return;
         }
+      }
+      // In a room with a linked Telegram bot, everything the owner writes also
+      // goes to Telegram. Commands returned above, so they never get here.
+      if (
+        telegramRelay?.getLink(chatJid) &&
+        isOwnerSender(msg.sender, msg.is_from_me === true)
+      ) {
+        telegramRelay
+          .forwardOwnerMessage(chatJid, msg)
+          .catch((err) =>
+            logger.error({ err, chatJid }, 'Telegram forward error'),
+          );
       }
       storeMessage(msg);
     },
@@ -2222,6 +2296,17 @@ async function main(): Promise<void> {
       .catch((err) => logger.warn({ err }, 'Failed to send restart notice'));
   }
 
+  telegramRelay = new TelegramRelay({
+    registeredGroups: () => registeredGroups,
+    deliver: (msg) => storeMessage(msg),
+    post: async (jid, text) =>
+      findChannel(channels, jid)?.sendMessage(jid, text),
+    postMedia: async (jid, filePath, caption) => {
+      await findChannel(channels, jid)?.sendMedia?.(jid, filePath, { caption });
+    },
+  });
+  telegramRelay.start();
+
   // Host-side Prisma regeneration reports back to the chat it ran for.
   setHostPrismaNotifier((jid, text) => {
     findChannel(channels, jid)
@@ -2249,14 +2334,16 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
+    sendMessage: async (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
+      await channel.sendMessage(jid, text);
+      await telegramRelay?.mirrorText(jid, text);
     },
     sendMedia: async (jid, filePath, options) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      await telegramRelay?.mirrorMedia(jid, filePath, options?.caption);
       if (channel.sendMedia) return channel.sendMedia(jid, filePath, options);
       // Legacy channels only do images — better a flattened send than none.
       if (channel.sendPhoto)

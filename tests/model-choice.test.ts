@@ -15,7 +15,7 @@ describe('resolveModelChoice', () => {
 
   it('bare family aliases point at the current generation', () => {
     expect(resolveModelChoice('opus')?.id).toBe('claude-opus-5-5');
-    expect(resolveModelChoice('fable')?.id).toBe('claude-fable-5-1');
+    expect(resolveModelChoice('fable')?.id).toBe('claude-fable-5-2');
     expect(resolveModelChoice('sonnet')?.id).toBe('claude-sonnet-5');
     expect(resolveModelChoice('haiku')?.id).toBe('claude-haiku-4-5');
   });
@@ -24,6 +24,7 @@ describe('resolveModelChoice', () => {
     expect(resolveModelChoice('opus-4.8')?.id).toBe('claude-opus-4-8');
     expect(resolveModelChoice('claude-opus-5')?.id).toBe('claude-opus-5');
     expect(resolveModelChoice('fable-5')?.id).toBe('claude-fable-5');
+    expect(resolveModelChoice('fable-5.1')?.id).toBe('claude-fable-5-1');
   });
 
   it('matches labels case-insensitively and by prefix', () => {

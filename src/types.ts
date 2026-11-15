@@ -78,6 +78,8 @@ export interface NewMessage {
   is_bot_message?: boolean;
   /** Absolute paths to image files attached to this message */
   images?: string[];
+  /** ID of the message this one replies to, where the channel reports it. */
+  reply_to?: string;
 }
 
 export interface ScheduledTask {
@@ -123,7 +125,8 @@ export interface SendMediaOptions {
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
+  /** Resolves to the sent message's ID where the channel knows it. */
+  sendMessage(jid: string, text: string): Promise<string | void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
@@ -137,6 +140,8 @@ export interface Channel {
   // Optional: send a photo/image. Legacy — channels that only do images
   // implement this, and the host falls back to it when sendMedia is absent.
   sendPhoto?(jid: string, filePath: string, caption?: string): Promise<void>;
+  // Optional: remove a message from the chat (e.g. one that held a secret).
+  deleteMessage?(jid: string, messageId: string): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.

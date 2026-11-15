@@ -23,7 +23,7 @@ export const HELP_SECTIONS: HelpSection[] = [
       { usage: '/info', description: 'Status of the running agent' },
       { usage: '/stop', description: 'Cancel the running agent' },
       {
-        usage: '/new',
+        usage: '/new  ·  ☀️ 🌞 🌅',
         description: 'Reset the conversation (asks to confirm)',
       },
       {
@@ -114,6 +114,31 @@ export const HELP_SECTIONS: HelpSection[] = [
       {
         usage: '/switch <org>',
         description: 'Switch Anthropic account',
+        ownerOnly: true,
+      },
+    ],
+  },
+  {
+    title: '📨 Telegram',
+    entries: [
+      {
+        usage: '/telegram',
+        description: 'Which Telegram bot feeds this room, and who it answers',
+      },
+      {
+        usage: '/telegram link <token>',
+        description:
+          'Link a @BotFather bot: its messages reach this room and the agent; yours go back as koko-human',
+        ownerOnly: true,
+      },
+      {
+        usage: '/telegram allow|deny <id|all>',
+        description: 'Who on Telegram the agent answers (locked by default)',
+        ownerOnly: true,
+      },
+      {
+        usage: '/telegram unlink',
+        description: 'Disconnect the bot',
         ownerOnly: true,
       },
     ],

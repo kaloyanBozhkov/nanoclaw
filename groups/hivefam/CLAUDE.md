@@ -20,8 +20,8 @@
 - *eventwoo/* deploys to Vercel project `eventwoo` (wip-ticket-wallet branch = staging)
 - *clients/eventwoo-default-public/* deploys to Vercel project `eventwoo-default-public`
 - *packages/sdk/* — SDK changes trigger both deployments
-- Production platform is Vercel project `hive-fam` tracking `main` branch — *never touch main*
-- `wip-ticket-wallet` is the staging branch — all work goes here
+- Production platform is Vercel project `hive-fam` tracking `main` (live since 2026-11-14)
+- **Since 2026-11-14: work directly on `main`** (production, Vercel `hive-fam`); staging (`wip-ticket-wallet`, staging.eventwoo.com) is parked until the owner revives it
 
 ## Project Context
 Multi-tenant event & ticketing SaaS platform built with Next.js App Router. Each organization gets its own domain (mapped in `src/server/config.ts`). The platform dashboard lives on `eventwoo.com` (and `localhost` in dev). Organizations manage events, sell tickets, create coupons, scan QR codes, handle payments via Stripe, and more.
@@ -62,9 +62,8 @@ pnpm email:dev        # preview email templates
 | `dev` | `next dev` | |
 | `build` | `next build` | |
 | `lint` | `eslint ./src` | Flat config (eslint.config.mjs) |
-| `db:generate` | `prisma migrate dev` | Creates + applies migration |
-| `db:migrate` | `prisma migrate deploy` | Applies pending migrations (prod) |
-| `db:push` | `prisma db push` | **NEVER run this without explicit instruction** |
+| `db:generate` | `prisma generate` | Regenerates the Prisma client (no migrations) |
+| `db:push` | `prisma db push` | How every DB gets the schema (no migration files since 2026-11-09). **NEVER run without explicit instruction** |
 | `db:studio` | `prisma studio` | |
 
 ## Architecture overview

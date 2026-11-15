@@ -145,6 +145,18 @@ export class MatrixClient {
     );
   }
 
+  redact(
+    roomId: string,
+    eventId: string,
+    reason?: string,
+  ): Promise<{ event_id: string }> {
+    return this.request(
+      'PUT',
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/redact/${encodeURIComponent(eventId)}/${this.txnId()}`,
+      reason ? { reason } : {},
+    );
+  }
+
   joinRoom(roomId: string): Promise<{ room_id: string }> {
     return this.request(
       'POST',
