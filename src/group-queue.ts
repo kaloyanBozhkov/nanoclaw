@@ -279,6 +279,31 @@ export class GroupQueue {
   }
 
   /**
+   * Signal the active container to apply a new set of switched-off MCP servers
+   * mid-run via an IPC file. The agent-runner calls query.setMcpServers() and
+   * reports the result in chat — no respawn needed. Returns true if written to
+   * a live (non-task) container.
+   */
+  sendMcpSwitch(groupJid: string, disabled: string[]): boolean {
+    const state = this.getGroup(groupJid);
+    if (!state.active || !state.groupFolder || state.isTaskContainer)
+      return false;
+
+    const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+    try {
+      fs.mkdirSync(inputDir, { recursive: true });
+      const filename = `${Date.now()}-setmcp.json`;
+      const filepath = path.join(inputDir, filename);
+      const tempPath = `${filepath}.tmp`;
+      fs.writeFileSync(tempPath, JSON.stringify({ type: 'setmcp', disabled }));
+      fs.renameSync(tempPath, filepath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Signal the active container to wind down by writing a close sentinel.
    */
   closeStdin(groupJid: string): void {

@@ -144,6 +144,26 @@ function applyModelSwitch(model: string): void {
     );
 }
 
+// /tools switches pushed live by the host ({type:'setmcp'}). Once set it
+// replaces the spawn-time containerInput.disabledMcpServers for the running
+// query and every later one in this container.
+let disabledMcpOverride: string[] | null = null;
+
+// Set while a query runs: applies a new off-list to it via setMcpServers().
+// Null between queries — the next query() reads disabledMcpOverride itself.
+let applyMcpToActiveQuery: ((disabled: string[]) => Promise<void>) | null =
+  null;
+
+function applyMcpSwitch(disabled: string[]): void {
+  disabledMcpOverride = disabled;
+  log(`MCP switch requested via IPC; off: ${disabled.join(', ') || 'none'}`);
+  applyMcpToActiveQuery?.(disabled).catch((err) =>
+    log(
+      `MCP switch failed: ${err instanceof Error ? err.message : String(err)}`,
+    ),
+  );
+}
+
 /**
  * Push-based async iterable for streaming user messages to the SDK.
  * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
@@ -518,6 +538,9 @@ function drainIpcInput(): IpcMessage[] {
         } else if (data.type === 'setmodel' && data.model) {
           // Live model switch from the /model chat command.
           applyModelSwitch(data.model);
+        } else if (data.type === 'setmcp' && Array.isArray(data.disabled)) {
+          // Live MCP server switch from the /tools chat command.
+          applyMcpSwitch(data.disabled);
         }
       } catch (err) {
         log(
@@ -796,6 +819,7 @@ async function runQuery(
   let turnInProgress = true; // the prompt is already queued
   let lastActivityAt = Date.now();
   let closeHeld = false;
+  let pendingToolsNote: string | null = null;
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
     // An AskUserQuestion is on screen waiting for its answer. Draining here
@@ -841,10 +865,14 @@ async function runQuery(
       log(
         `Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images)`,
       );
+      const text = pendingToolsNote
+        ? `${pendingToolsNote}\n\n${msg.text}`
+        : msg.text;
+      pendingToolsNote = null;
       if (msg.images?.length) {
-        stream.pushWithImages(msg.text, msg.images);
+        stream.pushWithImages(text, msg.images);
       } else {
-        stream.push(msg.text);
+        stream.push(text);
       }
       turnInProgress = true;
       lastActivityAt = Date.now();
@@ -887,9 +915,11 @@ async function runQuery(
   const gitSafety = containerInput.gitSafety !== false;
   // Tell the agent what's switched off, so it asks for it instead of
   // concluding the capability doesn't exist or working around it.
-  const offNames = (containerInput.disabledMcpServers ?? []).filter(
-    (n) => n !== 'nanoclaw',
-  );
+  const offNames = (
+    disabledMcpOverride ??
+    containerInput.disabledMcpServers ??
+    []
+  ).filter((n) => n !== 'nanoclaw');
   const toolsOffNote =
     offNames.length > 0
       ? `## Switched-off tools\n\nThese tool servers are switched off for this chat: ${offNames.join(', ')}. If a task needs one of them, don't work around it or say the capability doesn't exist — stop and ask the user to send \`/tools <name> on\` (e.g. \`/tools ${offNames[0]} on\`), then continue on their next message.`
@@ -905,8 +935,11 @@ async function runQuery(
       .join('\n\n') || undefined;
 
   // Servers switched off with /tools. nanoclaw is chat I/O and never dropped.
-  const disabled = new Set(
-    (containerInput.disabledMcpServers ?? []).filter((n) => n !== 'nanoclaw'),
+  const toDisabledSet = (names: string[]) =>
+    new Set(names.filter((n) => n !== 'nanoclaw'));
+  // `let`: a live /tools switch replaces it mid-query (applyMcpToActiveQuery).
+  let disabled = toDisabledSet(
+    disabledMcpOverride ?? containerInput.disabledMcpServers ?? [],
   );
   if (disabled.size > 0) log(`MCP servers off: ${[...disabled].join(', ')}`);
   const withoutDisabled = <T extends Record<string, unknown>>(servers: T): T =>
@@ -955,6 +988,76 @@ async function runQuery(
       `Notion token load/refresh failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+
+  // Every MCP server this container could run, before /tools filtering. A
+  // function so a live /tools switch can rebuild it (and pick up a refreshed
+  // Notion token) for setMcpServers().
+  const buildMcpServers = () => ({
+    nanoclaw: {
+      command: 'node',
+      args: [mcpServerPath],
+      env: {
+        NANOCLAW_CHAT_JID: containerInput.chatJid,
+        NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+        NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+      },
+      // Used nearly every turn (acks via send_message). Deferred behind
+      // tool search, the agent guessed its parameters and the first
+      // call failed; its schemas are small enough to always carry.
+      alwaysLoad: true,
+    },
+    context7: {
+      command: 'npx',
+      args: ['-y', '@upstash/context7-mcp@latest'],
+    },
+    playwright: {
+      command: 'npx',
+      args: ['@playwright/mcp@latest', '--headless'],
+    },
+    ...(process.env.PENCIL_MCP_URL
+      ? {
+          pencil: {
+            type: 'http',
+            url: process.env.PENCIL_MCP_URL,
+          } as any,
+        }
+      : {}),
+    // Claude Design lives on api.anthropic.com, which ANTHROPIC_BASE_URL
+    // already points at the host credential proxy — so the placeholder
+    // Authorization below is swapped for the real OAuth token on the way
+    // out and no credential ever enters the container. Requires the
+    // account to have granted the `agent_design_projects` consent at
+    // claude.ai/design/settings; without it every call returns
+    // {"error":"needs_consent"}.
+    ...(process.env.ANTHROPIC_BASE_URL
+      ? {
+          design: {
+            type: 'http' as const,
+            url: `${process.env.ANTHROPIC_BASE_URL.replace(/\/$/, '')}/v1/design/mcp`,
+            // Send the SAME routing key the host gave this container, so
+            // the proxy resolves it to this chat's Anthropic identity.
+            // Hardcoding a literal here silently authenticated every
+            // group as the default identity, regardless of /switch.
+            headers: {
+              Authorization: `Bearer ${
+                process.env.CLAUDE_CODE_OAUTH_TOKEN ||
+                process.env.ANTHROPIC_API_KEY ||
+                'placeholder'
+              }`,
+            },
+          },
+        }
+      : {}),
+    ...(notionAccessToken
+      ? {
+          notion: {
+            type: 'http' as const,
+            url: 'https://mcp.notion.com/mcp',
+            headers: { Authorization: `Bearer ${notionAccessToken}` },
+          },
+        }
+      : {}),
+  });
 
   const stopHeartbeat = startHeartbeat();
   try {
@@ -1011,72 +1114,7 @@ async function runQuery(
         allowDangerouslySkipPermissions: true,
         settingSources: ['project', 'user'],
         agents: subagents,
-        mcpServers: withoutDisabled({
-          nanoclaw: {
-            command: 'node',
-            args: [mcpServerPath],
-            env: {
-              NANOCLAW_CHAT_JID: containerInput.chatJid,
-              NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-              NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
-            },
-            // Used nearly every turn (acks via send_message). Deferred behind
-            // tool search, the agent guessed its parameters and the first
-            // call failed; its schemas are small enough to always carry.
-            alwaysLoad: true,
-          },
-          context7: {
-            command: 'npx',
-            args: ['-y', '@upstash/context7-mcp@latest'],
-          },
-          playwright: {
-            command: 'npx',
-            args: ['@playwright/mcp@latest', '--headless'],
-          },
-          ...(process.env.PENCIL_MCP_URL
-            ? {
-                pencil: {
-                  type: 'http',
-                  url: process.env.PENCIL_MCP_URL,
-                } as any,
-              }
-            : {}),
-          // Claude Design lives on api.anthropic.com, which ANTHROPIC_BASE_URL
-          // already points at the host credential proxy — so the placeholder
-          // Authorization below is swapped for the real OAuth token on the way
-          // out and no credential ever enters the container. Requires the
-          // account to have granted the `agent_design_projects` consent at
-          // claude.ai/design/settings; without it every call returns
-          // {"error":"needs_consent"}.
-          ...(process.env.ANTHROPIC_BASE_URL
-            ? {
-                design: {
-                  type: 'http' as const,
-                  url: `${process.env.ANTHROPIC_BASE_URL.replace(/\/$/, '')}/v1/design/mcp`,
-                  // Send the SAME routing key the host gave this container, so
-                  // the proxy resolves it to this chat's Anthropic identity.
-                  // Hardcoding a literal here silently authenticated every
-                  // group as the default identity, regardless of /switch.
-                  headers: {
-                    Authorization: `Bearer ${
-                      process.env.CLAUDE_CODE_OAUTH_TOKEN ||
-                      process.env.ANTHROPIC_API_KEY ||
-                      'placeholder'
-                    }`,
-                  },
-                },
-              }
-            : {}),
-          ...(notionAccessToken
-            ? {
-                notion: {
-                  type: 'http' as const,
-                  url: 'https://mcp.notion.com/mcp',
-                  headers: { Authorization: `Bearer ${notionAccessToken}` },
-                },
-              }
-            : {}),
-        }),
+        mcpServers: withoutDisabled(buildMcpServers()),
         hooks: {
           PreCompact: [
             { hooks: [createPreCompactHook(containerInput.assistantName)] },
@@ -1104,6 +1142,57 @@ async function runQuery(
       },
     });
     activeQuery = q;
+    applyMcpToActiveQuery = async (names) => {
+      const before = disabled;
+      disabled = toDisabledSet(names);
+      const turnedOn = [...before].filter((n) => !disabled.has(n));
+      const turnedOff = [...disabled].filter((n) => !before.has(n));
+      if (turnedOn.length === 0 && turnedOff.length === 0) return;
+      if (turnedOn.includes('notion')) {
+        try {
+          notionAccessToken = await getNotionAccessToken();
+        } catch (err) {
+          log(
+            `Notion token refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      const result = await q.setMcpServers(withoutDisabled(buildMcpServers()));
+      log(
+        `setMcpServers applied: added=[${result.added.join(', ')}] removed=[${result.removed.join(', ')}] errors=${JSON.stringify(result.errors)}`,
+      );
+      const failed = Object.entries(result.errors);
+      const connected = turnedOn.filter(
+        (n) => !(n in result.errors) && result.added.includes(n),
+      );
+      // On but not in the table at all (e.g. notion with no token, pencil
+      // with no PENCIL_MCP_URL): say so rather than claim it connected.
+      const unavailable = turnedOn.filter(
+        (n) => !(n in result.errors) && !result.added.includes(n),
+      );
+      const lines: string[] = [];
+      if (connected.length > 0)
+        lines.push(`🟢 Connected to the running session: ${connected.join(', ')}.`);
+      if (turnedOff.length > 0)
+        lines.push(`⚪️ Disconnected: ${turnedOff.join(', ')}.`);
+      for (const [name, error] of failed)
+        lines.push(`⚠️ ${name} failed to connect: ${error}`);
+      if (unavailable.length > 0)
+        lines.push(
+          `⚠️ Not available in this container: ${unavailable.join(', ')}.`,
+        );
+      if (lines.length > 0)
+        sendChatMessage(
+          containerInput.chatJid,
+          containerInput.groupFolder,
+          lines.join('\n'),
+        );
+      const nowOff = [...disabled];
+      pendingToolsNote =
+        `[Tool servers changed mid-session via /tools. Ignore the "Switched-off tools" list in your system prompt; it is out of date.` +
+        (connected.length > 0 ? ` Now ON: ${connected.join(', ')}.` : '') +
+        ` Now OFF: ${nowOff.join(', ') || 'none'}.]`;
+    };
     for await (const message of q) {
       messageCount++;
       lastActivityAt = Date.now();
@@ -1199,6 +1288,7 @@ async function runQuery(
   } finally {
     stopHeartbeat();
     activeQuery = null;
+    applyMcpToActiveQuery = null;
   }
 
   ipcPolling = false;

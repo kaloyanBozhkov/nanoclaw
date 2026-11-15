@@ -78,6 +78,7 @@ import { describeGitInfo } from './git-info.js';
 import { formatHelp } from './help.js';
 import { formatAgents, listAgentRoles } from './agents.js';
 import {
+  disabledMcpServers,
   findMcpTool,
   formatToolsStatus,
   isMcpEnabled,
@@ -1253,8 +1254,9 @@ async function main(): Promise<void> {
   }
 
   // "/tools" — which optional MCP servers this chat's agent gets.
-  // "/tools <name> on|off" — switch one (owner only). Read at container
-  // start, so a change closes the running container like /git-safety.
+  // "/tools <name> on|off" — switch one (owner only). A running container
+  // gets the new set live (setMcpServers in the agent-runner); a task
+  // container, or one that can't take the signal, is closed instead.
   async function handleToolsCommand(
     chatJid: string,
     arg: string,
@@ -1306,12 +1308,16 @@ async function main(): Promise<void> {
       return;
     }
 
-    // MCP servers are wired at container start: wind down the running one so
-    // the next message starts with the new set.
-    queue.closeStdin(chatJid);
+    // Push the new set into the running session. The agent-runner reports
+    // whether it connected. If there's no live container to take it, the next
+    // one starts with the new set; a task container is wound down.
+    const live = queue.sendMcpSwitch(chatJid, disabledMcpServers(updated));
+    if (!live) queue.closeStdin(chatJid);
     await channel.sendMessage(
       chatJid,
-      `${enabled ? '🟢' : '⚪️'} ${info.label} ${enabled ? 'ON' : 'OFF'} for this chat. Applies from your next message; anything already running finishes as it was.`,
+      live
+        ? `${enabled ? '🟢' : '⚪️'} ${info.label} ${enabled ? 'ON' : 'OFF'} for this chat. ${enabled ? 'Connecting it to' : 'Removing it from'} the running session now.`
+        : `${enabled ? '🟢' : '⚪️'} ${info.label} ${enabled ? 'ON' : 'OFF'} for this chat. Applies from your next message.`,
     );
   }
 
