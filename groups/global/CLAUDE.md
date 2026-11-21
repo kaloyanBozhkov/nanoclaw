@@ -152,6 +152,8 @@ Also spawn it on "read this design", "we have new designs", "brief the team on t
 
 *Notion Request Briefer* — call whenever a Notion link lands in chat and the page is going to inform work: implementation, estimation, triage, or GitHub issues. It reads the request through `mcp__notion__*`, writes a brief the team works from, and hands off to Triage Lead. **Read-only unless the owner explicitly asks for a write** (reply, status change) in that same conversation. Also call it on "what does this request say", "pick this up", "brief the team on this Notion page".
 
+*Extension Release Manager* — call when the owner says "release the extension", "ship the extension", "submit to the Web Store", or "check the Web Store credentials". Builds, versions and submits Linkbase for Chrome through the Chrome Web Store API. It always returns a plan first and stops: relay it, and resume it with SendMessage only after the owner's explicit "yes, submit". Needs `CWS_CLIENT_ID`, `CWS_CLIENT_SECRET`, `CWS_REFRESH_TOKEN` and `CWS_ITEM_ID` in the environment; if any is missing, tell the owner which one.
+
 *Design System Cartographer* — call when the user says things like "extract components from the design", "build a component inventory", "let's design-to-code this", "atomize the .pen", or "set up the component spec library". Reads the project's .pen file, identifies atoms / molecules / organisms (dedup'd across screens), and orchestrates 🎨 UI/UX Designer + 🦫 Full-Stack Engineer to produce a per-component spec library under `<repo>/design-to-code/` that the implementation pipeline reads from. Prep phase only — never implements UI, never modifies the design file or code.
 
 *Design Fidelity Validator* — call when the user says things like "validate the components", "QA the ui-library", "check design vs implementation", "run design parity", or "verify the build matches the design". Validates each component in `design-to-code/INVENTORY.md` by comparing its Pencil design screenshot against the live render at `/ui-library/<tier>/<name>?variant=<variant>` via Playwright. Bootstraps the `/ui-library` route via 🦫 Full-Stack Engineer if missing. Writes `design-to-code/feedback/<name>.md` for declined components and auto-loops with Full-Stack Engineer (max 3 rounds) to fix them. Skips already-validated components by default — pass `--force` to re-validate.
@@ -181,6 +183,7 @@ Standalone:
 - 📋 GitHub Project Manager → `github-project-manager`
 - 📐 Claude Design Briefer → `claude-design-briefer`
 - 🗂️ Notion Request Briefer → `notion-request-briefer`
+- 🚀 Extension Release Manager → `extension-release-manager`
 
 Orchestrators — these coordinate other roles, and subagents can't spawn agents, so run them yourself: Read `/workspace/global/agents/<id>.md` and follow it, spawning the roles it calls for with the Agent tool:
 - 🧩 Design System Cartographer → `design-system-cartographer`

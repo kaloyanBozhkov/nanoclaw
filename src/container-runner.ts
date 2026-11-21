@@ -519,6 +519,13 @@ export async function ensureArtifactSubpaths(
   for (const e of pending) ensuredSubpaths.add(e.subpath);
 }
 
+const CWS_ENV_KEYS = [
+  'CWS_CLIENT_ID',
+  'CWS_CLIENT_SECRET',
+  'CWS_REFRESH_TOKEN',
+  'CWS_ITEM_ID',
+] as const;
+
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -571,6 +578,7 @@ function buildContainerArgs(
     'VERCEL_TOKEN',
     'NPM_TOKEN',
     'GITLAB_TOKEN',
+    ...CWS_ENV_KEYS,
   ]);
   let ghToken = '';
   try {
@@ -602,6 +610,11 @@ function buildContainerArgs(
   const gitlabToken = envSecrets.GITLAB_TOKEN || '';
   if (gitlabToken) {
     args.push('-e', `GITLAB_TOKEN=${gitlabToken}`);
+  }
+
+  // Pass Chrome Web Store API credentials for the Extension Release Manager
+  for (const key of CWS_ENV_KEYS) {
+    if (envSecrets[key]) args.push('-e', `${key}=${envSecrets[key]}`);
   }
 
   // Pass Pencil MCP URL so container agents can connect to host Pencil MCP server

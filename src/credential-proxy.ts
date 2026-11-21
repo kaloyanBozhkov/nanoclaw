@@ -22,7 +22,10 @@ import {
   resolveGroupOrg,
 } from './config.js';
 import { readEnvFile, readEnvPrefixed } from './env.js';
-import { getDesignCredential, isDesignRequest } from './design-credential.js';
+import {
+  getFreshDesignCredential,
+  isDesignRequest,
+} from './design-credential.js';
 import { logger } from './logger.js';
 
 export type { AuthMode };
@@ -102,7 +105,7 @@ export function startCredentialProxy(
     const server = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
-      req.on('end', () => {
+      req.on('end', async () => {
         const body = Buffer.concat(chunks);
         const headers: Record<string, string | number | string[] | undefined> =
           {
@@ -123,7 +126,9 @@ export function startCredentialProxy(
         // the routing key rather than varying with /switch.
         let designHandled = false;
         if (isDesignRequest(req.url)) {
-          const design = getDesignCredential();
+          // Refreshes the short-lived design token first if it is about to
+          // expire; never throws.
+          const design = await getFreshDesignCredential();
           if (design) {
             delete headers['authorization'];
             delete headers['x-api-key'];

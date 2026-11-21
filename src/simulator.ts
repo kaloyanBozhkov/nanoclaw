@@ -132,6 +132,9 @@ export const MAX_SIM_TIMEOUT_MS = 600_000;
 const MAX_STREAM_CHARS = 200_000;
 const RESULT_TTL_MS = 60 * 60 * 1000;
 
+// Maestro run dirs (screenshots, logs) pile up forever otherwise.
+const RUN_DIR_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 const SAFE_REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
 /**
  * Device ids: iOS UDIDs, Android serials (`emulator-5554`) and AVD names
@@ -189,6 +192,23 @@ function auditLine(entry: Record<string, unknown>): void {
     );
   } catch (err) {
     logger.warn({ err }, 'Failed to append simulator audit line');
+  }
+}
+
+function sweepStaleRunDirs(runsDir: string): void {
+  try {
+    const now = Date.now();
+    for (const name of fs.readdirSync(runsDir)) {
+      const p = path.join(runsDir, name);
+      try {
+        if (now - fs.statSync(p).mtimeMs > RUN_DIR_TTL_MS)
+          fs.rmSync(p, { recursive: true, force: true });
+      } catch {
+        // Best effort.
+      }
+    }
+  } catch {
+    // Directory not there yet.
   }
 }
 
@@ -495,11 +515,9 @@ function plan(
     case 'run_flow': {
       const yaml = (req.flowYaml ?? '').trim();
       if (!yaml) return { ok: false, reason: 'run_flow needs flowYaml' };
-      const runDir = path.join(
-        groupMaestroDir(req.groupFolder),
-        'runs',
-        requestId,
-      );
+      const runsDir = path.join(groupMaestroDir(req.groupFolder), 'runs');
+      sweepStaleRunDirs(runsDir);
+      const runDir = path.join(runsDir, requestId);
       fs.mkdirSync(runDir, { recursive: true });
       const flowFile = path.join(runDir, 'flow.yaml');
       fs.writeFileSync(flowFile, `${yaml}\n`);
